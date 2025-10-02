@@ -1,0 +1,23 @@
+# Logs
+fronend/logs
+fronend/*.log
+fronend/npm-debug.log*
+fronend/yarn-debug.log*
+fronend/yarn-error.log*
+fronend/pnpm-debug.log*
+fronend/lerna-debug.log*
+fronend/node_modules
+fronend/dist
+fronend/dist-ssr
+fronend/*.local
+
+# Editor directories and files
+*/.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
