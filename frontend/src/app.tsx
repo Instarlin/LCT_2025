@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { useMatch, useNavigate } from 'react-router-dom'
 import { Button } from '@/components/ui/button'
 import './app.css'
 import { loadStudyById } from '@/data/load-study'
@@ -17,35 +16,178 @@ import { useViewerStore } from '@/lib/storage/viewer-store'
 import { useAuthStore } from '@/lib/storage/auth-store'
 import { useJobsStore } from '@/lib/storage/jobs-store'
 
+type ConnectionState = 'connected' | 'reconnecting'
+
+type WorkspaceController = ReturnType<typeof useWorkspaceController>
+
 const acceptedExtensions = ['.dcm', '.zip']
 const chunkSize = 5 * 1024 * 1024 // 5MB
 
 const App = () => {
-  const navigate = useNavigate()
-  const studyMatch = useMatch('/studies/:studyId')
-  const activeStudyId = studyMatch?.params?.studyId
+  const controller = useWorkspaceController()
 
+  if (!controller.isAuthenticated) {
+    return <AuthPage />
+  }
+
+  return <WorkspaceView controller={controller} />
+}
+
+const WorkspaceView = ({
+  controller,
+}: {
+  controller: WorkspaceController
+}) => {
+  const {
+    history,
+    sidebar,
+    auth,
+    jobs,
+    study,
+    upload,
+    viewer,
+    dicom,
+    handlers,
+  } = controller
+
+  const { filteredHistory, pathologyOptions, historySearch, setHistorySearch, selectedPathology, setSelectedPathology } =
+    history
+  const { viewerFullscreen, toggleSidebarCollapse } = sidebar
+  const { username } = auth
+  const { isLoading: jobsLoading, error: jobsError, activeStudyId } = jobs
+  const {
+    studyLoading,
+    studyError,
+  } = study
+  const {
+    job,
+    files,
+    anonymize,
+    setAnonymize,
+    connectionState,
+    isUploading,
+  } = upload
+  const {
+    selectedSegments,
+    toggleSegment,
+    sortedSegments,
+    viewerSlice,
+    setViewerSlice,
+    findings,
+    handleSort,
+    sortField,
+    sortAsc,
+  } = viewer
+  const { dicomFiles, dicomError } = dicom
+  const {
+    onResetWorkspace,
+    onFilesAccepted,
+    onCancelJob,
+    onRetry,
+    onCopyTable,
+    onSelectStudy,
+    onLogout,
+  } = handlers
+
+  return (
+    <div className="flex h-screen min-h-[720px] font-sans text-slate-900">
+      <HistorySidebar
+        filteredItems={filteredHistory}
+        pathologyOptions={pathologyOptions}
+        historySearch={historySearch}
+        onHistorySearchChange={setHistorySearch}
+        selectedPathology={selectedPathology}
+        onSelectPathology={setSelectedPathology}
+        onSelectStudy={onSelectStudy}
+        activeStudyId={activeStudyId}
+        onResetWorkspace={onResetWorkspace}
+        onToggleCollapse={toggleSidebarCollapse}
+        collapsed={viewerFullscreen}
+        username={username}
+        onLogout={onLogout}
+        isLoading={jobsLoading}
+        error={jobsError}
+      />
+
+      <main className="flex h-full flex-1 flex-col bg-white">
+        {studyLoading && (
+          <section className="flex flex-1 flex-col items-center justify-center gap-4 p-12 text-center text-slate-600">
+            <div className="h-12 w-12 animate-spin rounded-full border-4 border-slate-200 border-t-sky-400" aria-hidden="true" />
+            <p className="text-base font-medium">Загружаем исследование…</p>
+            <p className="max-w-sm text-sm text-slate-500">
+              Подготовка данных и восстановление 3D сегментации могут занять несколько секунд.
+            </p>
+          </section>
+        )}
+
+        {!studyLoading && !job && !studyError && (
+          <UploadLanding onFilesAccepted={onFilesAccepted} anonymize={anonymize} onToggleAnonymize={setAnonymize} />
+        )}
+
+        {!studyLoading && studyError && !job && (
+          <section className="flex flex-1 flex-col items-center justify-center gap-4 p-12 text-center">
+            <p className="text-lg font-semibold text-rose-500">{studyError}</p>
+            <p className="max-w-sm text-sm text-slate-500">
+              Попробуйте выбрать исследование ещё раз или загрузите собственные файлы.
+            </p>
+            <Button type="button" variant="outline" className={secondaryActionClass} onClick={onResetWorkspace}>
+              Вернуться к загрузке
+            </Button>
+          </section>
+        )}
+
+        {!studyLoading && job && (
+          <JobWorkspace
+            job={job}
+            files={files}
+            anonymize={anonymize}
+            onCancelJob={onCancelJob}
+            onRetry={onRetry}
+            connectionState={connectionState}
+            onCopySegments={onCopyTable}
+            isUploading={isUploading}
+            selectedSegments={selectedSegments}
+            toggleSegment={toggleSegment}
+            sortedSegments={sortedSegments}
+            viewerSlice={viewerSlice}
+            onViewerSliceChange={setViewerSlice}
+            findings={findings}
+            handleSort={handleSort}
+            sortField={sortField}
+            sortAsc={sortAsc}
+            dicomFiles={dicomFiles}
+            dicomError={dicomError}
+            viewerFullscreen={viewerFullscreen}
+          />
+        )}
+      </main>
+    </div>
+  )
+}
+
+function useWorkspaceController() {
+  const [activeStudyId, setActiveStudyId] = useState<string | null>(null)
   const [files, setFiles] = useState<File[]>([])
   const [job, setJob] = useState<UploadJob | null>(null)
   const [segments, setSegments] = useState<SegmentItem[]>([])
   const [findings, setFindings] = useState<FindingSummary[]>([])
   const [anonymize, setAnonymize] = useState(true)
-  const [connectionState, setConnectionState] = useState<'connected' | 'reconnecting'>('connected')
+  const [connectionState, setConnectionState] = useState<ConnectionState>('connected')
   const [viewerSlice, setViewerSlice] = useState(120)
   const [isUploading, setIsUploading] = useState(false)
   const [studyLoading, setStudyLoading] = useState(false)
   const [studyError, setStudyError] = useState<string | null>(null)
   const [dicomFiles, setDicomFiles] = useState<DicomFile[]>([])
   const [dicomError, setDicomError] = useState<string | null>(null)
+
   const viewerFullscreen = useViewerStore((state) => state.fullscreen)
   const setViewerFullscreen = useViewerStore((state) => state.setFullscreen)
   const resetViewerFullscreen = useViewerStore((state) => state.reset)
+
   const isAuthenticated = useAuthStore((state) => state.isAuthenticated)
   const authUsername = useAuthStore((state) => state.username)
   const logout = useAuthStore((state) => state.logout)
   const authToken = useAuthStore((state) => state.token)
-  const statusTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
-  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const jobs = useJobsStore((state) => state.items)
   const jobsLoading = useJobsStore((state) => state.loading)
@@ -65,8 +207,10 @@ const App = () => {
     filteredHistory,
   } = useHistoryBrowser(jobs)
 
-  const { selectedSegments, toggleSegment, sortedSegments, sortField, sortAsc, handleSort } =
-    useSegmentManager(segments)
+  const { selectedSegments, toggleSegment, sortedSegments, sortField, sortAsc, handleSort } = useSegmentManager(segments)
+
+  const statusTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const applySidebarDefault = useCallback(() => {
     if (typeof window === 'undefined') {
@@ -93,7 +237,7 @@ const App = () => {
         const authHeader = options?.token ?? authToken ?? undefined
         const headers: HeadersInit | undefined = authHeader ? { Authorization: `Bearer ${authHeader}` } : undefined
 
-        const files = await Promise.all(
+        const filesResult = await Promise.all(
           resources.map(async (resource, index) => {
             const url = resource.url
             if (!url) {
@@ -115,7 +259,7 @@ const App = () => {
           }),
         )
 
-        const sanitized = files.filter((item): item is DicomFile => item !== null)
+        const sanitized = filesResult.filter((item): item is DicomFile => item !== null)
         setDicomFiles(sanitized)
         setDicomError(null)
       } catch (error) {
@@ -183,7 +327,7 @@ const App = () => {
 
     void loadStudyById(activeStudyId, authToken ?? undefined)
       .then((data) => {
-        if (cancelled) return
+        if (cancelled || !data) return
         setSegments(data.segments)
         setFindings(data.findings)
         setViewerSlice(data.preferredSlice ?? 120)
@@ -234,7 +378,7 @@ const App = () => {
 
     void loadStudyById('__uploaded', authToken ?? undefined)
       .then((data) => {
-        if (cancelled) return
+        if (cancelled || !data) return
         setSegments(data.segments)
         setFindings(data.findings)
         setViewerSlice(data.preferredSlice ?? 120)
@@ -265,6 +409,7 @@ const App = () => {
     if (reconnectTimerRef.current) {
       clearTimeout(reconnectTimerRef.current)
     }
+    setActiveStudyId(null)
     setJob(null)
     setFiles([])
     setIsUploading(false)
@@ -278,8 +423,7 @@ const App = () => {
     setDicomFiles([])
     setDicomError(null)
     applySidebarDefault()
-    navigate('/')
-  }, [navigate, applySidebarDefault, setHistorySearch, setSelectedPathology])
+  }, [applySidebarDefault, setHistorySearch, setSelectedPathology])
 
   const handleLogout = useCallback(() => {
     resetWorkspace()
@@ -297,7 +441,9 @@ const App = () => {
         const nextProgress = Math.min(prev.progress + Math.random() * 8, 100)
         const eta = Math.max(Math.round(((100 - nextProgress) / 100) * 120), 0)
         if (nextProgress >= 100) {
-          clearInterval(statusTimerRef.current!)
+          if (statusTimerRef.current) {
+            clearInterval(statusTimerRef.current)
+          }
           return { ...prev, progress: 100, status: 'succeeded', etaSeconds: 0 }
         }
         return { ...prev, progress: nextProgress, etaSeconds: eta }
@@ -340,13 +486,13 @@ const App = () => {
         totalFiles: pickedFiles.length,
         totalBytes: total,
       }
+      setActiveStudyId(null)
       setStudyError(null)
       setSegments([])
       setFindings([])
       setViewerSlice(120)
       setDicomFiles([])
       setDicomError(null)
-      navigate('/')
       setFiles(pickedFiles)
       setJob(newJob)
 
@@ -356,7 +502,7 @@ const App = () => {
       }, 800)
       return newJob
     },
-    [navigate, simulateStatusStream],
+    [simulateStatusStream],
   )
 
   const handleFilesAccepted = useCallback(
@@ -494,20 +640,20 @@ const App = () => {
     [addJob, authToken, removeJob, simulateStatusStream, startJob, updateJob],
   )
 
-  const handleCancelJob = () => {
+  const handleCancelJob = useCallback(() => {
     if (!job) return
     if (statusTimerRef.current) {
       clearInterval(statusTimerRef.current)
     }
     setJob({ ...job, status: 'failed', progress: job.progress })
-  }
+  }, [job])
 
-  const handleRetry = () => {
+  const handleRetry = useCallback(() => {
     if (!files.length) return
     void handleFilesAccepted(files)
-  }
+  }, [files, handleFilesAccepted])
 
-  const handleCopyTable = async () => {
+  const handleCopyTable = useCallback(async () => {
     if (sortedSegments.length === 0) {
       return
     }
@@ -520,7 +666,7 @@ const App = () => {
     } catch (error) {
       console.error('Не удалось скопировать таблицу', error)
     }
-  }
+  }, [sortedSegments])
 
   useEffect(() => {
     if (!isAuthenticated) {
@@ -535,91 +681,79 @@ const App = () => {
     return () => clearInterval(jitter)
   }, [isAuthenticated, job, scheduleReconnection])
 
-  if (!isAuthenticated) {
-    return <AuthPage />
-  }
-
-  return (
-    <div
-      className={`flex h-screen min-h-[720px] font-sans text-slate-900`}
-    >
-      <HistorySidebar
-        filteredItems={filteredHistory}
-        pathologyOptions={pathologyOptions}
-        historySearch={historySearch}
-        onHistorySearchChange={setHistorySearch}
-        selectedPathology={selectedPathology}
-        onSelectPathology={setSelectedPathology}
-        activeStudyId={activeStudyId}
-        onResetWorkspace={resetWorkspace}
-        onToggleCollapse={() => setViewerFullscreen(!viewerFullscreen)}
-        collapsed={viewerFullscreen}
-        username={authUsername}
-        onLogout={handleLogout}
-        isLoading={jobsLoading}
-        error={jobsError}
-      />
-
-      <main
-        className={`flex h-full flex-1 flex-col bg-white`}
-      >
-        {studyLoading && (
-          <section className="flex flex-1 flex-col items-center justify-center gap-4 p-12 text-center text-slate-600">
-            <div className="h-12 w-12 animate-spin rounded-full border-4 border-slate-200 border-t-sky-400" aria-hidden="true" />
-            <p className="text-base font-medium">Загружаем исследование…</p>
-            <p className="max-w-sm text-sm text-slate-500">
-              Подготовка данных и восстановление 3D сегментации могут занять несколько секунд.
-            </p>
-          </section>
-        )}
-
-        {!studyLoading && !job && !studyError && (
-          <UploadLanding
-            onFilesAccepted={handleFilesAccepted}
-            anonymize={anonymize}
-            onToggleAnonymize={setAnonymize}
-          />
-        )}
-
-        {!studyLoading && studyError && !job && (
-          <section className="flex flex-1 flex-col items-center justify-center gap-4 p-12 text-center">
-            <p className="text-lg font-semibold text-rose-500">{studyError}</p>
-            <p className="max-w-sm text-sm text-slate-500">
-              Попробуйте выбрать исследование ещё раз или загрузите собственные файлы.
-            </p>
-            <Button type="button" variant="outline" className={secondaryActionClass} onClick={resetWorkspace}>
-              Вернуться к загрузке
-            </Button>
-          </section>
-        )}
-
-        {!studyLoading && job && (
-          <JobWorkspace
-            job={job}
-            files={files}
-            anonymize={anonymize}
-            onCancelJob={handleCancelJob}
-            onRetry={handleRetry}
-            connectionState={connectionState}
-            onCopySegments={handleCopyTable}
-            isUploading={isUploading}
-            selectedSegments={selectedSegments}
-            toggleSegment={toggleSegment}
-            sortedSegments={sortedSegments}
-            viewerSlice={viewerSlice}
-            onViewerSliceChange={setViewerSlice}
-            findings={findings}
-            handleSort={handleSort}
-            sortField={sortField}
-            sortAsc={sortAsc}
-            dicomFiles={dicomFiles}
-            dicomError={dicomError}
-            viewerFullscreen={viewerFullscreen}
-          />
-      )}
-      </main>
-    </div>
+  const handleSelectStudy = useCallback(
+    (id: string) => {
+      setActiveStudyId(id)
+      setJob(null)
+      setFiles([])
+      setIsUploading(false)
+      setStudyError(null)
+      setDicomFiles([])
+      setDicomError(null)
+    },
+    [],
   )
+
+  return {
+    isAuthenticated,
+    history: {
+      filteredHistory,
+      pathologyOptions,
+      historySearch,
+      setHistorySearch,
+      selectedPathology,
+      setSelectedPathology,
+    },
+    sidebar: {
+      viewerFullscreen,
+      toggleSidebarCollapse: () => setViewerFullscreen(!useViewerStore.getState().fullscreen),
+    },
+    auth: {
+      username: authUsername,
+    },
+    jobs: {
+      isLoading: jobsLoading,
+      error: jobsError,
+      activeStudyId: activeStudyId ?? undefined,
+    },
+    study: {
+      studyLoading,
+      studyError,
+    },
+    upload: {
+      job,
+      files,
+      anonymize,
+      setAnonymize,
+      connectionState,
+      isUploading,
+    },
+    viewer: {
+      segments,
+      selectedSegments,
+      toggleSegment,
+      sortedSegments,
+      viewerSlice,
+      setViewerSlice,
+      findings,
+      handleSort,
+      sortField,
+      sortAsc,
+    },
+    dicom: {
+      dicomFiles,
+      dicomError,
+    },
+    handlers: {
+      onResetWorkspace: resetWorkspace,
+      onFilesAccepted: handleFilesAccepted,
+      onCancelJob: handleCancelJob,
+      onRetry: handleRetry,
+      onCopyTable: handleCopyTable,
+      onSelectStudy: handleSelectStudy,
+      onLogout: handleLogout,
+    },
+  }
 }
 
 export default App

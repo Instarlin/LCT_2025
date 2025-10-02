@@ -1,4 +1,3 @@
-import { Link } from 'react-router-dom'
 import { PanelLeftClose, Plus, Search } from 'lucide-react'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Button } from '@/components/ui/button'
@@ -21,6 +20,7 @@ export type HistorySidebarProps = {
   onHistorySearchChange: (value: string) => void
   selectedPathology?: string
   onSelectPathology: (value: string | undefined) => void
+  onSelectStudy: (id: string) => void
   activeStudyId?: string
   onResetWorkspace: () => void
   onToggleCollapse: () => void
@@ -43,6 +43,7 @@ export const HistorySidebar = ({
   onHistorySearchChange,
   selectedPathology,
   onSelectPathology,
+  onSelectStudy,
   activeStudyId,
   onResetWorkspace,
   onToggleCollapse,
@@ -151,15 +152,16 @@ export const HistorySidebar = ({
                     : null
                 const isActive = item.id === activeStudyId
                 return (
-                  <Link
+                  <button
                     key={item.id}
-                    to={`/studies/${item.id}`}
-                    className={`flex h-[72px] flex-col justify-between rounded-xl border px-4 py-3 shadow-xs transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
+                    type="button"
+                    onClick={() => onSelectStudy(item.id)}
+                    className={`flex h-[72px] flex-col justify-between rounded-xl border px-4 py-3 text-left shadow-xs transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
                       isActive
                         ? 'border-sky-200 bg-sky-50 text-slate-800'
                         : 'border-slate-200 bg-white/90 hover:-translate-y-0.5 hover:border-slate-400 hover:shadow-sm hover:shadow-slate-300'
                     }`}
-                    aria-current={isActive ? 'page' : undefined}
+                    aria-pressed={isActive ? 'true' : 'false'}
                   >
                     <div className="flex items-center justify-between">
                       <span className={`truncate text-sm font-semibold ${isActive ? 'text-slate-800' : 'text-slate-700'}`}>
@@ -172,7 +174,7 @@ export const HistorySidebar = ({
                         {formatShortDate(item.studyDate)}
                       </time>
                     </div>
-                  </Link>
+                  </button>
                 )
               })}
           </div>
