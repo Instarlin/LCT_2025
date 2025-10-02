@@ -216,12 +216,9 @@ const fetchStudyFromApi = async (studyId: string, token?: string): Promise<Study
 
 export const loadStudyById = async (studyId: string, token?: string): Promise<StudyData | null> => {
   if (studyId !== '__uploaded') {
-    try {
-      const remote = await fetchStudyFromApi(studyId, token)
-      if (remote) {
-        return remote
-      }
-    } catch (error) {
+    const remote = await fetchStudyFromApi(studyId, token).catch(() => null)
+    if (remote) {
+      return remote
     }
   }
 
