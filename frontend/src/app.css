@@ -1,0 +1,39 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+html, body {
+  overflow: hidden;
+}
+
+@layer base {
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(148, 163, 184, 0.6) transparent;
+  }
+
+  *::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  *::-webkit-scrollbar-track {
+    background: rgba(248, 250, 252, 0.85);
+    border-radius: 999px;
+  }
+
+  *::-webkit-scrollbar-thumb {
+    background: linear-gradient(180deg, rgba(148, 163, 184, 0.85), rgba(120, 134, 156, 0.85));
+    border-radius: 999px;
+    border: 2px solid rgba(248, 250, 252, 0.9);
+  }
+
+  *::-webkit-scrollbar-thumb:hover {
+    background: linear-gradient(180deg, rgba(120, 134, 156, 0.9), rgba(94, 110, 137, 0.9));
+  }
+
+  *::-webkit-scrollbar-button {
+    height: 0;
+    width: 0;
+    display: none;
+  }
+}

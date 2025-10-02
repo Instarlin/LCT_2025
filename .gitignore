@@ -1,23 +1,62 @@
-# Logs
-fronend/logs
-fronend/*.log
-fronend/npm-debug.log*
-fronend/yarn-debug.log*
-fronend/yarn-error.log*
-fronend/pnpm-debug.log*
-fronend/lerna-debug.log*
-fronend/node_modules
-fronend/dist
-fronend/dist-ssr
-fronend/*.local
-
-# Editor directories and files
-*/.vscode/*
-!.vscode/extensions.json
-.idea
+# General
 .DS_Store
+Thumbs.db
+*.log
+*.tmp
+*.swp
+*.swo
+
+# Environments & secrets
+.env
+.env.local
+.env.*
+!.env.example
+
+# Python / FastAPI backend
+__pycache__/
+*.py[cod]
+*.pyd
+*.python-version
+*.sqlite3
+.mypy_cache/
+.pytest_cache/
+coverage/
+htmlcov/
+.pytype/
+.cache/
+.venv/
+venv/
+Pipfile.lock
+
+# Node / frontend
+frontend/node_modules/
+frontend/.yarn/
+frontend/.pnp.cjs
+frontend/.pnp.loader.mjs
+frontend/.turbo/
+frontend/.vite/
+frontend/dist/
+frontend/dist-ssr/
+frontend/.eslintcache
+frontend/npm-debug.log*
+frontend/yarn-debug.log*
+frontend/yarn-error.log*
+frontend/pnpm-debug.log*
+
+# Package manager caches anywhere
+**/node_modules/
+**/dist/
+**/build/
+
+# IDE & editor config
+.vscode/
+!.vscode/extensions.json
+.idea/
+*.iml
 *.suo
 *.ntvs*
 *.njsproj
 *.sln
-*.sw?
+
+# Docker artifacts
+.docker/
