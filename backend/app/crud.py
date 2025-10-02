@@ -18,12 +18,6 @@ def get_user(db: Session, user_id: int) -> Optional[models.User]:
     """Получает пользователя по ID"""
     return db.query(models.User).filter(models.User.id == user_id).first()
 
-def get_user_by_email(db: Session, email: str) -> Optional[models.User]:
-    """Получает пользователя по email"""
-    if email is None:
-        return None
-    return db.query(models.User).filter(models.User.email == email).first()
-
 def get_user_by_username(db: Session, username: str) -> Optional[models.User]:
     """Получает пользователя по username"""
     return db.query(models.User).filter(models.User.username == username).first()
@@ -37,10 +31,6 @@ def create_user(db: Session, user: schemas.UserCreate) -> models.User:
     hashed_password = get_password_hash(user.password)
     db_user = models.User(
         username=user.username,
-        email=user.email,
-        full_name=user.full_name,
-        bio=user.bio,
-        avatar_url=user.avatar_url,
         hashed_password=hashed_password
     )
     db.add(db_user)

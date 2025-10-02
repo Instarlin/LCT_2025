@@ -3,7 +3,6 @@ import type { Accept, FileRejection } from 'react-dropzone'
 import { useDropzone } from 'react-dropzone'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
-import { gradientButtonClass } from '@/lib/styles'
 import { cn } from '@/lib/utils'
 import { UploadCloud } from 'lucide-react'
 
@@ -66,7 +65,7 @@ export const UploadLanding = ({
           </p>
           <Button
             type="button"
-            className={gradientButtonClass}
+            className={"rounded-xl bg-gradient-to-r from-sky-500 via-indigo-500 to-cyan-400 px-5 py-2 font-semibold text-white shadow-xs transition-transform duration-200 hover:-translate-y-0.5 hover:shadow-md hover:shadow-slate-300"}
             onClick={(event) => {
               event.preventDefault()
               event.stopPropagation()

@@ -4,6 +4,8 @@ from typing import Optional, List
 import uuid
 import json
 
+from sqlalchemy.orm import joinedload
+
 def get_job(db: Session, job_id: int) -> Optional[models.Job]:
     """Получает задание по ID"""
     return db.query(models.Job).filter(models.Job.id == job_id).first()
@@ -16,13 +18,40 @@ def get_job_by_uuid(db: Session, job_uuid: str) -> Optional[models.Job]:
         return None
     return db.query(models.Job).filter(models.Job.uuid == uuid_value).first()
 
-def get_jobs_by_owner(db: Session, owner_id: int, skip: int = 0, limit: int = 100) -> List[models.Job]:
-    """Получает задания пользователя с пагинацией"""
-    return db.query(models.Job).filter(models.Job.owner_id == owner_id).offset(skip).limit(limit).all()
+def get_jobs_by_owner(
+    db: Session,
+    owner_id: Optional[int] = None,
+    *,
+    owner_username: Optional[str] = None,
+    skip: int = 0,
+    limit: int = 100,
+) -> List[models.Job]:
+    """Получает задания пользователя с пагинацией.
 
-def get_all_jobs(db: Session, skip: int = 0, limit: int = 100) -> List[models.Job]:
-    """Получает все задания с пагинацией"""
-    return db.query(models.Job).offset(skip).limit(limit).all()
+    Допускает выбор по идентификатору пользователя или по username, что
+    упрощает использование с текущим механизмом авторизации.
+    """
+
+    query = db.query(models.Job).options(joinedload(models.Job.owner))
+
+    if owner_id is not None:
+        query = query.filter(models.Job.owner_id == owner_id)
+    elif owner_username is not None:
+        query = query.join(models.Job.owner).filter(models.User.username == owner_username)
+    else:
+        return []
+
+    query = query.order_by(models.Job.created_at.desc())
+
+    skip_value = max(skip, 0)
+    limit_value = max(limit, 0) if limit is not None else None
+
+    if limit_value:
+        query = query.offset(skip_value).limit(limit_value)
+    else:
+        query = query.offset(skip_value)
+
+    return query.all()
 
 def create_job(db: Session, job: schemas.JobCreate, owner_id: int) -> models.Job:
     """Создает новое задание"""
@@ -96,24 +125,3 @@ def delete_job(db: Session, job_id: int) -> bool:
     db.delete(db_job)
     db.commit()
     return True
-
-def get_jobs_by_status(db: Session, status: str, skip: int = 0, limit: int = 100) -> List[models.Job]:
-    """Получает задания по статусу"""
-    return db.query(models.Job).filter(models.Job.status == status).offset(skip).limit(limit).all()
-
-def get_job_with_zip_contents(db: Session, job_id: int) -> Optional[models.Job]:
-    """Получает задание с распарсенным содержимым ZIP архива"""
-    job = get_job(db, job_id)
-    if not job:
-        return None
-    
-    # Парсим ZIP содержимое если есть
-    if job.zip_contents:
-        try:
-            job.zip_contents_parsed = json.loads(job.zip_contents)
-        except json.JSONDecodeError:
-            job.zip_contents_parsed = []
-    else:
-        job.zip_contents_parsed = []
-    
-    return job

@@ -12,7 +12,6 @@ from fastapi import (
     Form,
 )
 from fastapi.responses import StreamingResponse
-from fastapi.security import HTTPBearer
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional
 import asyncio
@@ -164,25 +163,6 @@ async def process_job(job_uuid: str, input_object: str) -> None:
     finally:
         session.close()
 
-@app.get("/", tags=["🏠 Главная"])
-def read_root():
-    """
-    **Главная страница API**
-    
-    Приветственное сообщение и проверка работоспособности всех сервисов.
-    """
-    return {
-        "message": "Добро пожаловать в California Gold API!",
-        "status": "active",
-        "version": "1.0.0",
-        "team": "California Gold Team",
-        "services": {
-            "minio": "✅ Подключен",
-            "postgresql": "✅ Подключен"
-        },
-        "description": "Современное API для управления файлами и пользователями"
-    }
-
 # Эндпоинты аутентификации
 @app.post("/auth/register", response_model=schemas.UserResponse, tags=["🔐 Аутентификация"])
 def register_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
@@ -241,20 +221,10 @@ def login_user(user_credentials: schemas.UserLogin, db: Session = Depends(get_db
     )
     return {"access_token": access_token, "token_type": "bearer"}
 
-@app.get("/auth/me", response_model=schemas.UserResponse, tags=["🔐 Аутентификация"])
-def read_users_me(current_user: models.User = Depends(auth.get_current_active_user)):
-    """
-    **Текущий пользователь**
-    
-    Возвращает информацию о текущем авторизованном пользователе.
-    """
-    return current_user
-
 @app.post("/upload", tags=["📁 Файлы"])
 async def upload_file(
     file: UploadFile = File(...), 
     bucket_name: str = "uploads",
-    current_user: models.User = Depends(auth.get_current_active_user)
 ):
     """
     **Загрузка файла**
@@ -298,7 +268,6 @@ async def upload_file(
 async def list_files(
     bucket_name: str = "uploads", 
     prefix: str = "",
-    current_user: models.User = Depends(auth.get_current_active_user)
 ):
     """
     **Список файлов**
@@ -324,7 +293,6 @@ async def list_files(
 async def download_file(
     filename: str, 
     bucket_name: str = "uploads",
-    current_user: models.User = Depends(auth.get_current_active_user)
 ):
     """
     **Скачивание файла**
@@ -357,7 +325,6 @@ async def download_file(
 async def delete_file(
     filename: str, 
     bucket_name: str = "uploads",
-    current_user: models.User = Depends(auth.get_current_active_user)
 ):
     """
     **Удаление файла**
@@ -385,7 +352,6 @@ async def get_file_url(
     filename: str, 
     bucket_name: str = "uploads", 
     expires: int = 3600,
-    current_user: models.User = Depends(auth.get_current_active_user)
 ):
     """
     **Presigned URL**
@@ -436,7 +402,6 @@ def read_users(
     skip: int = 0, 
     limit: int = 100, 
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_active_user)
 ):
     """
     **Список пользователей**
@@ -455,7 +420,6 @@ def read_users(
 def read_user(
     user_id: int, 
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_active_user)
 ):
     """
     **Получение пользователя по ID**
@@ -476,7 +440,6 @@ def update_user(
     user_id: int, 
     user_update: schemas.UserUpdate, 
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_active_user)
 ):
     """
     **Обновление пользователя**
@@ -497,7 +460,6 @@ def update_user(
 def delete_user(
     user_id: int, 
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_active_user)
 ):
     """
     **Удаление пользователя**
@@ -517,7 +479,6 @@ def delete_user(
 def read_user_by_username(
     username: str, 
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_active_user)
 ):
     """
     **Поиск пользователя по username**
@@ -542,7 +503,7 @@ async def create_job(
     description: str = Form(None),
     file: UploadFile = File(None),
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_active_user)
+    current_user: models.User = Depends(auth.get_current_user),
 ):
     """
     **Создание нового задания**
@@ -647,29 +608,27 @@ async def create_job(
 
 @app.get("/jobs", response_model=List[schemas.JobResponse], tags=["📋 Задания"])
 def get_user_jobs(
-    skip: int = 0,
-    limit: int = 100,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_active_user)
+    current_user: models.User = Depends(auth.get_current_user),
+    limit: int = 100,
+    skip: int = 0,
 ):
     """
     **Получение заданий пользователя**
-    
-    Получает список заданий текущего пользователя с пагинацией.
-    
-    - **skip**: Количество заданий для пропуска (по умолчанию 0)
-    - **limit**: Максимальное количество заданий (по умолчанию 100)
-    
     Возвращает список заданий пользователя.
     """
-    jobs = job_crud.get_jobs_by_owner(db=db, owner_id=current_user.id, skip=0, limit=limit)
+    jobs = job_crud.get_jobs_by_owner(
+        db=db,
+        owner_id=current_user.id,
+        skip=skip,
+        limit=limit,
+    )
     return jobs
 
 @app.get("/jobs/{job_id}", response_model=schemas.JobResponse, tags=["📋 Задания"])
 def get_job(
     job_id: str,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_active_user)
 ):
     """
     **Получение задания по UUID**
@@ -686,34 +645,6 @@ def get_job(
     if job is None:
         raise HTTPException(status_code=404, detail="Задание не найдено")
 
-    if job.owner_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Нет доступа к этому заданию")
-
-    return job
-
-@app.get("/jobs/uuid/{job_uuid}", response_model=schemas.JobResponse, tags=["📋 Задания"])
-def get_job_by_uuid(
-    job_uuid: str,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_active_user)
-):
-    """
-    **Получение задания по UUID**
-    
-    Получает информацию о задании по его UUID.
-    
-    - **job_uuid**: UUID задания
-    
-    Возвращает информацию о задании.
-    """
-    job = job_crud.get_job_by_uuid(db=db, job_uuid=job_uuid)
-    if job is None:
-        raise HTTPException(status_code=404, detail="Задание не найдено")
-    
-    # Проверяем, что пользователь является владельцем задания
-    if job.owner_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Нет доступа к этому заданию")
-    
     return job
 
 @app.put("/jobs/{job_id}", response_model=schemas.JobResponse, tags=["📋 Задания"])
@@ -722,7 +653,6 @@ def update_job(
     job_update: schemas.JobUpdate,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_active_user)
 ):
     """
     **Обновление задания**
@@ -738,10 +668,6 @@ def update_job(
     if job is None:
         raise HTTPException(status_code=404, detail="Задание не найдено")
     
-    # Проверяем, что пользователь является владельцем задания
-    if job.owner_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Нет доступа к этому заданию")
-    
     updated_job = job_crud.update_job(db=db, job_id=job_id, job_update=job_update)
     schedule_job_broadcast(background_tasks, updated_job)
     return updated_job
@@ -750,7 +676,6 @@ def update_job(
 def delete_job(
     job_id: int,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_active_user)
 ):
     """
     **Удаление задания**
@@ -764,10 +689,6 @@ def delete_job(
     job = job_crud.get_job(db=db, job_id=job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Задание не найдено")
-    
-    # Проверяем, что пользователь является владельцем задания
-    if job.owner_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Нет доступа к этому заданию")
     
     # Удаляем файл из MinIO если он есть
     if job.file_path:
@@ -784,7 +705,6 @@ def delete_job(
 def download_job_file(
     job_id: int,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_active_user)
 ):
     """
     **Скачивание файла задания**
@@ -798,10 +718,6 @@ def download_job_file(
     job = job_crud.get_job(db=db, job_id=job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Задание не найдено")
-    
-    # Проверяем, что пользователь является владельцем задания
-    if job.owner_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Нет доступа к этому заданию")
     
     if not job.file_path:
         raise HTTPException(status_code=404, detail="Файл не найден")
@@ -822,7 +738,6 @@ def download_job_file(
 def get_zip_contents(
     job_id: int,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_active_user)
 ):
     """
     **Получение содержимого ZIP архива**
@@ -836,10 +751,6 @@ def get_zip_contents(
     job = job_crud.get_job(db=db, job_id=job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Задание не найдено")
-    
-    # Проверяем, что пользователь является владельцем задания
-    if job.owner_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Нет доступа к этому заданию")
     
     if job.file_type != "zip":
         raise HTTPException(status_code=400, detail="Задание не содержит ZIP архив")
@@ -862,7 +773,6 @@ def get_zip_contents(
 def get_zip_info(
     job_id: int,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_active_user)
 ):
     """
     **Получение информации о ZIP архиве**
@@ -876,10 +786,6 @@ def get_zip_info(
     job = job_crud.get_job(db=db, job_id=job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Задание не найдено")
-    
-    # Проверяем, что пользователь является владельцем задания
-    if job.owner_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Нет доступа к этому заданию")
     
     if job.file_type != "zip":
         raise HTTPException(status_code=400, detail="Задание не содержит ZIP архив")
@@ -959,6 +865,27 @@ def complete_job(
     if payload.file_name:
         job.file_name = payload.file_name
 
+    parsed_payload = None
+    should_parse = (
+        job.status is not None
+        and job.status.lower() in {"succeeded", "success", "completed", "done"}
+        and bool(job.file_path)
+    )
+
+    if should_parse:
+        success, file_bytes = minio_utils.get_file_from_minio(job.file_path)
+        if success and file_bytes:
+            try:
+                parsed_payload = parse_job_xlsx(file_bytes)
+            except Exception:  # noqa: BLE001
+                logger.exception("Failed to parse results payload for job %s", job_id)
+        elif not success:
+            logger.error("Job %s: unable to download results file '%s'", job_id, job.file_path)
+
+    if parsed_payload:
+        job.results_payload = json.dumps(parsed_payload, ensure_ascii=False)
+        job.results_parsed_at = datetime.utcnow()
+
     db.add(job)
     db.commit()
     db.refresh(job)
@@ -970,16 +897,12 @@ def get_job_results(
     job_id: str,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_active_user),
 ):
     job = job_crud.get_job_by_uuid(db=db, job_uuid=job_id)
     if job is None and job_id.isdigit():
         job = job_crud.get_job(db=db, job_id=int(job_id))
     if job is None:
         raise HTTPException(status_code=404, detail="Задание не найдено")
-
-    if job.owner_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Нет доступа к этому заданию")
 
     if job.results_payload:
         return {

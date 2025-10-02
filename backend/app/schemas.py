@@ -19,22 +19,15 @@ class UserCreate(UserBase):
     def validate_password(cls, v):
         if len(v) < 6:
             raise ValueError('Пароль должен содержать минимум 6 символов')
-        if len(v) > 128:
-            raise ValueError('Пароль слишком длинный (максимум 128 символов)')
+        if len(v) > 24:
+            raise ValueError('Пароль слишком длинный (максимум 24 символов)')
         return v
 
 class UserUpdate(BaseModel):
     username: Optional[str] = None
-    email: Optional[EmailStr] = None
-    full_name: Optional[str] = None
-    bio: Optional[str] = None
-    avatar_url: Optional[str] = None
-    is_active: Optional[bool] = None
 
 class UserResponse(UserBase):
     id: int
-    is_active: bool
-    is_superuser: bool
     created_at: datetime
     updated_at: Optional[datetime] = None
     

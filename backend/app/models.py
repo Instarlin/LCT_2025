@@ -9,17 +9,9 @@ class User(Base):
     
     id = Column(Integer, primary_key=True, index=True)
     username = Column(String(50), unique=True, index=True, nullable=False)
-    email = Column(String(100), unique=True, index=True, nullable=True)
-    full_name = Column(String(100), nullable=True)
     hashed_password = Column(String(255), nullable=False)
-    is_active = Column(Boolean, default=True)
-    is_superuser = Column(Boolean, default=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
-    bio = Column(Text, nullable=True)
-    avatar_url = Column(String(500), nullable=True)
-    
-    # Связь с заданиями
     jobs = relationship("Job", back_populates="owner")
 
 class Job(Base):
@@ -42,6 +34,4 @@ class Job(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     completed_at = Column(DateTime(timezone=True), nullable=True)
-    
-    # Связь с пользователем
     owner = relationship("User", back_populates="jobs")

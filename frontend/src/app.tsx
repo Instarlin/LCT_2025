@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import './app.css'
-import { loadStudyById } from '@/data/load-study'
 import { UploadLanding } from '@/features/upload/upload-landing'
 import { HistorySidebar } from '@/features/history/history-sidebar'
 import { useHistoryBrowser } from '@/features/history/use-history-browser'
@@ -144,41 +143,6 @@ const mapSummaryToFindings = (summary?: Record<string, unknown>): FindingSummary
       label,
       value: value === null || value === undefined ? '—' : String(value),
     }))
-}
-
-const mapMetricsToSegments = (metrics?: Array<Record<string, unknown>>): SegmentItem[] => {
-  if (!metrics) return []
-
-  const extractNumber = (row: Record<string, unknown>, keys: string[]): number => {
-    for (const key of keys) {
-      const value = row[key]
-      const numeric = typeof value === 'number' ? value : typeof value === 'string' ? Number.parseFloat(value) : NaN
-      if (Number.isFinite(numeric)) {
-        return numeric
-      }
-    }
-    return 0
-  }
-
-  return metrics.map((row, index) => {
-    const label =
-      (typeof row.label === 'string' && row.label) ||
-      (typeof row.name === 'string' && row.name) ||
-      (typeof row.metric === 'string' && row.metric) ||
-      (typeof row.region === 'string' && row.region) ||
-      `Metric ${index + 1}`
-
-    const volume = extractNumber(row, ['volume', 'volume_ml', 'volumeMl', 'volume (ml)', 'Объём (мл)'])
-    const percentage = extractNumber(row, ['percentage', 'percent', 'percentage_%', '% лёгочной ткани', '%'])
-
-    return {
-      id: `${index}-${label}`,
-      label,
-      color: '#38bdf8',
-      volumeMl: Number.isFinite(volume) ? volume : 0,
-      percentage: Number.isFinite(percentage) ? percentage : 0,
-    }
-  })
 }
 
 const App = () => {
@@ -405,12 +369,6 @@ function useWorkspaceController() {
         setFindings(summaryFindings)
       }
 
-      const metricSegments = mapMetricsToSegments(normalized.metrics)
-      if (metricSegments.length > 0) {
-        setSegments(metricSegments)
-        setDicomFiles([])
-        setDicomError(null)
-      }
     },
     [],
   )
@@ -750,31 +708,15 @@ function useWorkspaceController() {
     let cancelled = false
     setStudyLoading(true)
     setStudyError(null)
+    setSegments([])
+    setFindings([])
 
     const load = async () => {
       try {
-        const [studyData, jobMeta] = await Promise.all([
-          loadStudyById(activeStudyId, authToken ?? undefined),
-          fetchJobMeta(activeStudyId),
-        ])
+        const jobMeta = await fetchJobMeta(activeStudyId)
 
         if (cancelled) {
           return
-        }
-
-        if (studyData) {
-          setSegments(studyData.segments)
-          setFindings(studyData.findings)
-          setViewerSlice(studyData.preferredSlice ?? 120)
-          setFiles([])
-          setDicomFiles([])
-          setDicomError(null)
-          void hydrateDicomResources(studyData.dicomResources, {
-            token: authToken ?? undefined,
-          })
-        } else {
-          setSegments([])
-          setFindings([])
         }
 
         applyJobMeta(jobMeta)
@@ -799,45 +741,7 @@ function useWorkspaceController() {
     return () => {
       cancelled = true
     }
-  }, [activeStudyId, applyJobMeta, authToken, fetchJobMeta, hydrateDicomResources, isAuthenticated])
-
-  useEffect(() => {
-    if (!isAuthenticated) {
-      return
-    }
-    if (activeStudyId || !job || job.status !== 'succeeded' || segments.length > 0) {
-      return
-    }
-
-    let cancelled = false
-    setStudyLoading(true)
-    setStudyError(null)
-
-    void loadStudyById('__uploaded', authToken ?? undefined)
-      .then((data) => {
-        if (cancelled || !data) return
-        setSegments(data.segments)
-        setFindings(data.findings)
-        setViewerSlice(data.preferredSlice ?? 120)
-        setDicomFiles([])
-        setDicomError(null)
-        void hydrateDicomResources(data.dicomResources, { token: authToken ?? undefined })
-      })
-      .catch((error) => {
-        if (cancelled) return
-        console.error('Не удалось подготовить результаты загрузки', error)
-        setStudyError('Не удалось подготовить результаты загрузки')
-      })
-      .finally(() => {
-        if (!cancelled) {
-          setStudyLoading(false)
-        }
-      })
-
-    return () => {
-      cancelled = true
-    }
-  }, [activeStudyId, authToken, hydrateDicomResources, isAuthenticated, job, segments.length])
+  }, [activeStudyId, applyJobMeta, fetchJobMeta, isAuthenticated])
 
   const resetWorkspace = useCallback(() => {
     if (statusTimerRef.current) {
