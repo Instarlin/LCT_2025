@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 
 DEFAULT_PROFILE = os.getenv("ML_DEFAULT_PROFILE", "fast_debug")
-DEFAULT_THRESHOLD = float(os.getenv("ML_DECISION_THRESHOLD", "0.55"))
+DEFAULT_THRESHOLD = float(os.getenv("ML_DECISION_THRESHOLD", "0.25"))
 
 
 @dataclass(frozen=True)
