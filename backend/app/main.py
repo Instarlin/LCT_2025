@@ -14,6 +14,7 @@ from fastapi import (
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional
+from urllib.parse import quote
 import asyncio
 import io
 import json
@@ -934,3 +935,38 @@ def get_job_results(
         "results": parsed,
         "source": "fresh",
     }
+
+
+@app.get("/jobs/{job_id}/results.xlsx", tags=["📋 Задания"])
+def download_job_results_xlsx(
+    job_id: str,
+    db: Session = Depends(get_db),
+):
+    job = job_crud.get_job_by_uuid(db=db, job_uuid=job_id)
+    if job is None and job_id.isdigit():
+        job = job_crud.get_job(db=db, job_id=int(job_id))
+    if job is None:
+        raise HTTPException(status_code=404, detail="Задание не найдено")
+
+    if not job.file_path:
+        raise HTTPException(status_code=404, detail="Результат ещё не готов")
+
+    success, file_bytes = minio_utils.get_file_from_minio(job.file_path)
+    if not success or not file_bytes:
+        raise HTTPException(status_code=500, detail="Не удалось загрузить результат из хранилища")
+
+    filename = job.file_name or f"{job_id}.xlsx"
+    if not filename.lower().endswith(".xlsx"):
+        filename = f"{filename}.xlsx"
+
+    sanitized_filename = filename.replace("\"", "").replace(";", "").strip() or f"job-{job_id}.xlsx"
+    ascii_filename = sanitized_filename.encode("ascii", "ignore").decode("ascii") or "job-results.xlsx"
+    content_disposition = (
+        f"attachment; filename=\"{ascii_filename}\"; filename*=UTF-8''{quote(sanitized_filename)}"
+    )
+
+    return StreamingResponse(
+        io.BytesIO(file_bytes),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": content_disposition},
+    )

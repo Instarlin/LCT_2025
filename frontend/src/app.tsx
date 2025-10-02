@@ -10,7 +10,7 @@ import { AuthPage } from '@/features/auth/auth-page'
 import { extractDicomFiles } from '@/lib/dicom/extract-dicoms'
 import type { DicomFile } from '@/lib/dicom/extract-dicoms'
 import { secondaryActionClass } from '@/lib/styles'
-import type { FindingSummary, HistoryItem, SegmentItem, StudyData, UploadJob, JobStatus } from '@/types/workspace'
+import type { FindingSummary, HistoryItem, UploadJob, JobStatus } from '@/types/workspace'
 import { useViewerStore } from '@/lib/storage/viewer-store'
 import { useAuthStore } from '@/lib/storage/auth-store'
 import { useJobsStore } from '@/lib/storage/jobs-store'
@@ -145,6 +145,29 @@ const mapSummaryToFindings = (summary?: Record<string, unknown>): FindingSummary
     }))
 }
 
+const extractFilenameFromDisposition = (value?: string | null): string | null => {
+  if (!value) {
+    return null
+  }
+
+  const utf8Match = value.match(/filename\*=UTF-8''([^;]+)/i)
+  if (utf8Match && utf8Match[1]) {
+    try {
+      return decodeURIComponent(utf8Match[1])
+    } catch (error) {
+      console.error('Не удалось декодировать имя файла', error)
+      return utf8Match[1]
+    }
+  }
+
+  const quotedMatch = value.match(/filename="?([^";]+)"?/i)
+  if (quotedMatch && quotedMatch[1]) {
+    return quotedMatch[1]
+  }
+
+  return null
+}
+
 const App = () => {
   const controller = useWorkspaceController()
 
@@ -189,17 +212,12 @@ const WorkspaceView = ({
     connectionState,
     isUploading,
     jobTerminal,
+    jobResults,
   } = upload
   const {
-    selectedSegments,
-    toggleSegment,
-    sortedSegments,
     viewerSlice,
     setViewerSlice,
     findings,
-    handleSort,
-    sortField,
-    sortAsc,
   } = viewer
   const { dicomFiles, dicomError } = dicom
   const {
@@ -207,7 +225,7 @@ const WorkspaceView = ({
     onFilesAccepted,
     onCancelJob,
     onRetry,
-    onCopyTable,
+    onExportXlsx,
     onSelectStudy,
     onLogout,
   } = handlers
@@ -268,20 +286,15 @@ const WorkspaceView = ({
             onRetry={onRetry}
             connectionState={connectionState}
             showConnection={!jobTerminal}
-            onCopySegments={onCopyTable}
             isUploading={isUploading}
-            selectedSegments={selectedSegments}
-            toggleSegment={toggleSegment}
-            sortedSegments={sortedSegments}
             viewerSlice={viewerSlice}
             onViewerSliceChange={setViewerSlice}
             findings={findings}
-            handleSort={handleSort}
-            sortField={sortField}
-            sortAsc={sortAsc}
             dicomFiles={dicomFiles}
             dicomError={dicomError}
             viewerFullscreen={viewerFullscreen}
+            jobResults={jobResults}
+            onExportXlsx={onExportXlsx}
           />
         )}
       </main>
@@ -293,7 +306,6 @@ function useWorkspaceController() {
   const [activeStudyId, setActiveStudyId] = useState<string | null>(null)
   const [files, setFiles] = useState<File[]>([])
   const [job, setJob] = useState<UploadJob | null>(null)
-  const [segments, setSegments] = useState<SegmentItem[]>([])
   const [findings, setFindings] = useState<FindingSummary[]>([])
   const [anonymize, setAnonymize] = useState(true)
   const [connectionState, setConnectionState] = useState<ConnectionState>('connected')
@@ -333,12 +345,11 @@ function useWorkspaceController() {
     filteredHistory,
   } = useHistoryBrowser(jobs)
 
-  const { selectedSegments, toggleSegment, sortedSegments, sortField, sortAsc, handleSort } = useSegmentManager(segments)
-
   const statusTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const uploadRequestRef = useRef<XMLHttpRequest | null>(null)
   const fetchedResultsRef = useRef<Set<string>>(new Set())
+  const refreshedJobMetaRef = useRef<Set<string>>(new Set())
   const wsRef = useRef<WebSocket | null>(null)
   const wsRetryRef = useRef<number | null>(null)
   const shouldReconnectRef = useRef(true)
@@ -497,6 +508,7 @@ function useWorkspaceController() {
       updateJob(meta.id, {
         summary: statusSummaryText[mappedStatus],
       })
+
     },
     [applyJobResults, fetchJobResults, updateJob],
   )
@@ -605,56 +617,6 @@ function useWorkspaceController() {
     [applyJobMeta, mapJobPayloadToMeta],
   )
 
-  const hydrateDicomResources = useCallback(
-    async (resources: StudyData['dicomResources'] | undefined, options?: { token?: string }) => {
-      if (!resources || resources.length === 0) {
-        setDicomFiles([])
-        setDicomError(null)
-        return
-      }
-
-      if (typeof window === 'undefined') {
-        return
-      }
-
-      try {
-        const authHeader = options?.token ?? authToken ?? undefined
-        const headers: HeadersInit | undefined = authHeader ? { Authorization: `Bearer ${authHeader}` } : undefined
-
-        const filesResult = await Promise.all(
-          resources.map(async (resource, index) => {
-            const url = resource.url
-            if (!url) {
-              return null
-            }
-
-            const response = await fetch(url, {
-              headers,
-            })
-
-            if (!response.ok) {
-              throw new Error(`Request failed with status ${response.status}`)
-            }
-
-            const blob = await response.blob()
-            const filename = resource.name ?? `dicom-${index + 1}.dcm`
-            const file = new File([blob], filename, { type: blob.type || 'application/dicom' })
-            return { name: filename, file }
-          }),
-        )
-
-        const sanitized = filesResult.filter((item): item is DicomFile => item !== null)
-        setDicomFiles(sanitized)
-        setDicomError(null)
-      } catch (error) {
-        console.error('Не удалось загрузить DICOM данные', error)
-        setDicomFiles([])
-        setDicomError('Не удалось загрузить DICOM данные')
-      }
-    },
-    [authToken],
-  )
-
   useEffect(() => {
     return () => {
       if (statusTimerRef.current) {
@@ -708,7 +670,6 @@ function useWorkspaceController() {
     let cancelled = false
     setStudyLoading(true)
     setStudyError(null)
-    setSegments([])
     setFindings([])
 
     const load = async () => {
@@ -726,7 +687,6 @@ function useWorkspaceController() {
         }
         console.error('Не удалось загрузить исследование', error)
         setStudyError('Не удалось загрузить исследование')
-        setSegments([])
         setFindings([])
         setJob(null)
       } finally {
@@ -742,6 +702,32 @@ function useWorkspaceController() {
       cancelled = true
     }
   }, [activeStudyId, applyJobMeta, fetchJobMeta, isAuthenticated])
+
+  useEffect(() => {
+    const jobId = job?.id
+    if (!jobId) {
+      return
+    }
+
+    if (job?.status === 'succeeded') {
+      if (refreshedJobMetaRef.current.has(jobId)) {
+        return
+      }
+
+      refreshedJobMetaRef.current.add(jobId)
+      void fetchJobMeta(jobId)
+        .then((meta) => {
+          if (meta) {
+            applyJobMeta(meta)
+          }
+        })
+        .catch((error) => {
+          console.error('Не удалось обновить метаданные задания после завершения', error)
+        })
+    } else {
+      refreshedJobMetaRef.current.delete(jobId)
+    }
+  }, [applyJobMeta, fetchJobMeta, job])
 
   const resetWorkspace = useCallback(() => {
     if (statusTimerRef.current) {
@@ -770,7 +756,6 @@ function useWorkspaceController() {
     setHistorySearch('')
     setSelectedPathology(undefined)
     setViewerSlice(120)
-    setSegments([])
     setFindings([])
     setStudyError(null)
     setStudyLoading(false)
@@ -778,6 +763,7 @@ function useWorkspaceController() {
     setDicomError(null)
     setJobResults(null)
     fetchedResultsRef.current.clear()
+    refreshedJobMetaRef.current.clear()
     setConnectionState('connected')
     applySidebarDefault()
   }, [applySidebarDefault, setHistorySearch, setSelectedPathology])
@@ -879,7 +865,6 @@ function useWorkspaceController() {
       }
       setActiveStudyId(null)
       setStudyError(null)
-      setSegments([])
       setFindings([])
       setViewerSlice(120)
       setDicomFiles([])
@@ -1029,20 +1014,53 @@ function useWorkspaceController() {
     void handleFilesAccepted(files)
   }, [files, handleFilesAccepted])
 
-  const handleCopyTable = useCallback(async () => {
-    if (sortedSegments.length === 0) {
+  const handleExportXlsx = useCallback(async () => {
+    if (typeof window === 'undefined') {
       return
     }
 
-    const rows = sortedSegments
-      .map((item) => `${item.label}\t${item.volumeMl} мл\t${item.percentage}%`)
-      .join('\n')
-    try {
-      await navigator.clipboard.writeText(`Метка\tОбъём\tПроцент\n${rows}`)
-    } catch (error) {
-      console.error('Не удалось скопировать таблицу', error)
+    const jobId = job?.id
+    if (!jobId) {
+      return
     }
-  }, [sortedSegments])
+
+    try {
+      const headers: Record<string, string> = {
+        Accept: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      }
+      if (authToken) {
+        headers.Authorization = `Bearer ${authToken}`
+      }
+
+      const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/results.xlsx`, {
+        method: 'GET',
+        headers,
+      })
+
+      if (!response.ok) {
+        throw new Error(`Request failed with status ${response.status}`)
+      }
+
+      const blob = await response.blob()
+      if (blob.size === 0) {
+        throw new Error('Получен пустой файл')
+      }
+
+      const contentDisposition = response.headers.get('content-disposition')
+      const filename = extractFilenameFromDisposition(contentDisposition) ?? `job-${jobId}.xlsx`
+
+      const url = window.URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = filename
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      window.URL.revokeObjectURL(url)
+    } catch (error) {
+      console.error('Не удалось скачать XLSX', error)
+    }
+  }, [authToken, job])
 
   useEffect(() => {
     if (!isAuthenticated) {
@@ -1104,18 +1122,12 @@ function useWorkspaceController() {
       connectionState,
       isUploading,
       jobTerminal,
+      jobResults,
     },
     viewer: {
-      segments,
-      selectedSegments,
-      toggleSegment,
-      sortedSegments,
       viewerSlice,
       setViewerSlice,
       findings,
-      handleSort,
-      sortField,
-      sortAsc,
     },
     dicom: {
       dicomFiles,
@@ -1126,7 +1138,7 @@ function useWorkspaceController() {
       onFilesAccepted: handleFilesAccepted,
       onCancelJob: handleCancelJob,
       onRetry: handleRetry,
-      onCopyTable: handleCopyTable,
+      onExportXlsx: handleExportXlsx,
       onSelectStudy: handleSelectStudy,
       onLogout: handleLogout,
     },

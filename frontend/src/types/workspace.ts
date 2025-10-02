@@ -22,24 +22,25 @@ export interface HistoryItem {
   pathologies: Array<{ label: string; probability: number }>
 }
 
-export interface SegmentItem {
-  id: string
-  label: string
-  color: string
-  volumeMl: number
-  percentage: number
-}
-
 export interface FindingSummary {
   label: string
   value: string
   hint?: string
 }
 
-export interface StudyData {
-  segments: SegmentItem[]
-  findings: FindingSummary[]
-  preferredSlice?: number
-  initialNote?: string
-  dicomResources?: Array<{ name?: string; url: string }>
+export interface JobResultsRow {
+  study_uid?: string | null
+  series_uid?: string | null
+  probability_of_pathology?: number | null
+  pathology?: boolean | string | null
+  time_of_processing?: string | null
+  most_dangerous_pathology_type?: string | null
+  hazard_probability?: number | null
+  probability_of_anomaly?: number | null
+}
+
+export interface JobResultsPayload {
+  parsed_at?: string | null
+  summary?: Record<string, unknown> | null
+  rows?: JobResultsRow[]
 }
