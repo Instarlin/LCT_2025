@@ -37,6 +37,7 @@ def upload_fileobj_to_minio(
     content_type: Optional[str] = None,
     size: Optional[int] = None,
     part_size: int = 10 * 1024 * 1024,
+    object_name: Optional[str] = None,
 ) -> Tuple[bool, str]:
     """Потоково загружает файл в MinIO."""
     try:
@@ -45,9 +46,11 @@ def upload_fileobj_to_minio(
         if not ensure_bucket_exists(client):
             return False, ""
 
-        file_uuid = str(uuid.uuid4())
-        file_extension = os.path.splitext(file_name)[1]
-        object_name = f"jobs/{file_uuid}{file_extension}"
+        target_object_name = object_name
+        if not target_object_name:
+            file_uuid = str(uuid.uuid4())
+            file_extension = os.path.splitext(file_name)[1]
+            target_object_name = f"jobs/{file_uuid}{file_extension}"
 
         if not content_type:
             content_type, _ = mimetypes.guess_type(file_name)
@@ -66,7 +69,7 @@ def upload_fileobj_to_minio(
 
         client.put_object(
             MINIO_BUCKET,
-            object_name,
+            target_object_name,
             file_obj,
             length=size if size is not None else -1,
             part_size=part_size,
@@ -79,8 +82,8 @@ def upload_fileobj_to_minio(
         except Exception:
             pass
 
-        print(f"✅ Файл '{file_name}' загружен в MinIO как '{object_name}'")
-        return True, object_name
+        print(f"✅ Файл '{file_name}' загружен в MinIO как '{target_object_name}'")
+        return True, target_object_name
 
     except S3Error as e:
         print(f"❌ Ошибка загрузки файла в MinIO: {e}")
@@ -90,14 +93,42 @@ def upload_fileobj_to_minio(
         return False, ""
 
 
-def upload_file_to_minio(file_content: bytes, file_name: str, content_type: Optional[str] = None) -> Tuple[bool, str]:
+def upload_file_to_minio(
+    file_content: bytes,
+    file_name: str,
+    content_type: Optional[str] = None,
+    object_name: Optional[str] = None,
+) -> Tuple[bool, str]:
     """
     Сохраняет совместимость для вызовов, передающих содержимое в памяти.
     """
     from io import BytesIO
 
     file_data = BytesIO(file_content)
-    return upload_fileobj_to_minio(file_data, file_name, content_type, size=len(file_content))
+    return upload_fileobj_to_minio(
+        file_data,
+        file_name,
+        content_type,
+        size=len(file_content),
+        object_name=object_name,
+    )
+
+
+def download_file_from_minio(object_name: str, destination_path: str) -> bool:
+    """Скачивает файл из MinIO в указанную локальную директорию."""
+    try:
+        client = get_minio_client()
+        dest_dir = os.path.dirname(destination_path)
+        if dest_dir:
+            os.makedirs(dest_dir, exist_ok=True)
+        client.fget_object(MINIO_BUCKET, object_name, destination_path)
+        return True
+    except S3Error as e:
+        print(f"❌ Ошибка загрузки файла из MinIO: {e}")
+        return False
+    except Exception as e:
+        print(f"❌ Неожиданная ошибка при загрузке файла из MinIO: {e}")
+        return False
 
 def get_file_from_minio(object_name: str) -> Tuple[bool, bytes]:
     """

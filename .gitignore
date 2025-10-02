@@ -50,6 +50,10 @@ frontend/pnpm-debug.log*
 **/dist/
 **/build/
 
+# ML artifacts
+ml/model/
+ml/stats.npz
+
 # IDE & editor config
 .vscode/
 !.vscode/extensions.json

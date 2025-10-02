@@ -1,4 +1,4 @@
 [submodule "ml"]
 	path = ml
-	url = https://github.com/Tehnorobot/abcd.git
+	url = https://github.com/Instarlin/abcd.git
 	branch = main

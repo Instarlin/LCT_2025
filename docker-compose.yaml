@@ -15,12 +15,15 @@ services:
       MINIO_ACCESS_KEY: minioadmin
       MINIO_SECRET_KEY: minioadmin
       DATABASE_URL: postgresql://postgres:password@postgres:5432/californiagold
+      ML_SERVICE_URL: http://ml-service:8080
     volumes:
       - ./backend:/app
     depends_on:
       postgres:
         condition: service_healthy
       minio:
+        condition: service_started
+      ml-service:
         condition: service_started
 
   frontend:
@@ -68,6 +71,20 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+
+  ml-service:
+    build:
+      context: ./ml
+      dockerfile: Dockerfile
+    container_name: ml-service
+    environment:
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_BUCKET: californiagold
+    depends_on:
+      minio:
+        condition: service_started
 
 volumes:
   frontend_node_modules:
