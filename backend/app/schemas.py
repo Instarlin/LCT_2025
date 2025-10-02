@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr, validator
+from pydantic import BaseModel, EmailStr, validator, Field, ConfigDict
 from typing import Optional
 from datetime import datetime
 import uuid
@@ -58,7 +58,7 @@ class UserLogin(BaseModel):
 class JobBase(BaseModel):
     title: Optional[str] = None
     description: Optional[str] = None
-    file_type: Optional[str] = "single"  # single, zip
+
 
 class JobCreate(JobBase):
     pass
@@ -68,22 +68,19 @@ class JobUpdate(BaseModel):
     description: Optional[str] = None
     status: Optional[str] = None
 
-class JobResponse(JobBase):
-    id: int
-    uuid: uuid.UUID
+class JobResponse(BaseModel):
+    id: uuid.UUID = Field(validation_alias="uuid")
+    title: Optional[str] = None
+    description: Optional[str] = None
     status: str
     file_name: Optional[str] = None
     file_size: Optional[int] = None
-    file_content_type: Optional[str] = None
-    file_type: Optional[str] = "single"
-    zip_contents: Optional[str] = None  # JSON строка с содержимым ZIP архива
     owner_id: int
     created_at: datetime
     updated_at: Optional[datetime] = None
-    completed_at: Optional[datetime] = None
-    
-    class Config:
-        from_attributes = True
+
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
+
 
 class JobWithOwner(JobResponse):
     owner: UserResponse

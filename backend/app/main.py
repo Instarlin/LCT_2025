@@ -565,27 +565,28 @@ def get_user_jobs(
 
 @app.get("/jobs/{job_id}", response_model=schemas.JobResponse, tags=["📋 Задания"])
 def get_job(
-    job_id: int,
+    job_id: str,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_active_user)
 ):
     """
-    **Получение задания по ID**
+    **Получение задания по UUID**
     
     Получает информацию о конкретном задании.
     
-    - **job_id**: ID задания
+    - **job_id**: UUID задания (для обратной совместимости поддерживаются числовые идентификаторы)
     
     Возвращает информацию о задании.
     """
-    job = job_crud.get_job(db=db, job_id=job_id)
+    job = job_crud.get_job_by_uuid(db=db, job_uuid=job_id)
+    if job is None and job_id.isdigit():
+        job = job_crud.get_job(db=db, job_id=int(job_id))
     if job is None:
         raise HTTPException(status_code=404, detail="Задание не найдено")
-    
-    # Проверяем, что пользователь является владельцем задания
+
     if job.owner_id != current_user.id:
         raise HTTPException(status_code=403, detail="Нет доступа к этому заданию")
-    
+
     return job
 
 @app.get("/jobs/uuid/{job_uuid}", response_model=schemas.JobResponse, tags=["📋 Задания"])

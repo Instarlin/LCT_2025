@@ -14,6 +14,8 @@ Thumbs.db
 
 # Python / FastAPI backend
 __pycache__/
+**/__pycache__/
+*.pyc
 *.py[cod]
 *.pyd
 *.python-version

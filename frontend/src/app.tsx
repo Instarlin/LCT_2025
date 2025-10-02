@@ -11,7 +11,7 @@ import { AuthPage } from '@/features/auth/auth-page'
 import { extractDicomFiles } from '@/lib/dicom/extract-dicoms'
 import type { DicomFile } from '@/lib/dicom/extract-dicoms'
 import { secondaryActionClass } from '@/lib/styles'
-import type { FindingSummary, HistoryItem, SegmentItem, StudyData, UploadJob } from '@/types/workspace'
+import type { FindingSummary, HistoryItem, SegmentItem, StudyData, UploadJob, JobStatus } from '@/types/workspace'
 import { useViewerStore } from '@/lib/storage/viewer-store'
 import { useAuthStore } from '@/lib/storage/auth-store'
 import { useJobsStore } from '@/lib/storage/jobs-store'
@@ -32,6 +32,18 @@ type UploadFileParams = {
 type UploadJobResult = {
   jobId?: string
   rawResponse: unknown
+}
+
+type JobMeta = {
+  id: string
+  status?: string | null
+  title?: string | null
+  description?: string | null
+  file_name?: string | null
+  file_size?: number | null
+  owner_id?: number
+  created_at?: string | null
+  updated_at?: string | null
 }
 
 const uploadJobFile = ({ file, token, onProgress, assignRequest }: UploadFileParams): Promise<UploadJobResult> =>
@@ -85,6 +97,27 @@ const uploadJobFile = ({ file, token, onProgress, assignRequest }: UploadFilePar
     formData.append('file', file)
     xhr.send(formData)
   })
+
+const mapJobStatusToUploadStatus = (status?: string | null): JobStatus => {
+  if (!status) {
+    return 'queued'
+  }
+
+  const normalized = status.toLowerCase()
+  if (normalized === 'completed' || normalized === 'done') {
+    return 'succeeded'
+  }
+  if (normalized === 'failed' || normalized === 'error') {
+    return 'failed'
+  }
+  if (normalized === 'processing' || normalized === 'in_progress') {
+    return 'running'
+  }
+  if (normalized === 'pending' || normalized === 'queued') {
+    return 'queued'
+  }
+  return 'queued'
+}
 
 const App = () => {
   const controller = useWorkspaceController()
@@ -276,6 +309,78 @@ function useWorkspaceController() {
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const uploadRequestRef = useRef<XMLHttpRequest | null>(null)
 
+  const fetchJobMeta = useCallback(
+    async (jobId: string): Promise<JobMeta> => {
+      const headers: Record<string, string> = {
+        Accept: 'application/json',
+      }
+      if (authToken) {
+        headers.Authorization = `Bearer ${authToken}`
+      }
+
+      const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`, {
+        method: 'GET',
+        headers,
+      })
+
+      if (!response.ok) {
+        throw new Error(`Не удалось получить задание (${response.status})`)
+      }
+
+      const payload = (await response.json()) as Partial<JobMeta>
+      return {
+        id:
+          typeof payload.id === 'string' && payload.id.trim().length > 0
+            ? payload.id
+            : jobId,
+        status: payload.status ?? null,
+        title: payload.title ?? null,
+        description: payload.description ?? null,
+        file_name: payload.file_name ?? null,
+        file_size:
+          typeof payload.file_size === 'number' ? payload.file_size : null,
+        owner_id: payload.owner_id,
+        created_at: payload.created_at ?? null,
+        updated_at: payload.updated_at ?? null,
+      }
+    },
+    [authToken],
+  )
+
+  const applyJobMeta = useCallback((meta: JobMeta) => {
+    setJob((previous) => {
+      const mappedStatus = mapJobStatusToUploadStatus(meta.status)
+      const previousProgress = previous?.progress ?? 0
+      const statusProgress =
+        mappedStatus === 'succeeded'
+          ? 100
+          : mappedStatus === 'failed'
+            ? 0
+            : previousProgress
+
+      const totalBytes =
+        typeof meta.file_size === 'number'
+          ? meta.file_size
+          : previous?.totalBytes ?? 0
+
+      const totalFiles = meta.file_name ? 1 : previous?.totalFiles ?? 0
+
+      const startedAt = meta.created_at
+        ? Date.parse(meta.created_at)
+        : previous?.startedAt ?? Date.now()
+
+      return {
+        id: meta.id,
+        status: mappedStatus,
+        progress: Math.max(previousProgress, statusProgress),
+        etaSeconds: mappedStatus === 'running' ? previous?.etaSeconds : undefined,
+        startedAt,
+        totalFiles,
+        totalBytes,
+      }
+    })
+  }, [])
+
   const applySidebarDefault = useCallback(() => {
     if (typeof window === 'undefined') {
       resetViewerFullscreen()
@@ -389,44 +494,55 @@ function useWorkspaceController() {
     setStudyLoading(true)
     setStudyError(null)
 
-    void loadStudyById(activeStudyId, authToken ?? undefined)
-      .then((data) => {
-        if (cancelled || !data) return
-        setSegments(data.segments)
-        setFindings(data.findings)
-        setViewerSlice(data.preferredSlice ?? 120)
-        setFiles([])
-        setDicomFiles([])
-        setDicomError(null)
-        void hydrateDicomResources(data.dicomResources, { token: authToken ?? undefined })
-        setJob({
-          id: activeStudyId,
-          status: 'succeeded',
-          progress: 100,
-          etaSeconds: 0,
-          startedAt: Date.now(),
-          totalFiles: 0,
-          totalBytes: 0,
-        })
-      })
-      .catch((error) => {
-        if (cancelled) return
+    const load = async () => {
+      try {
+        const [studyData, jobMeta] = await Promise.all([
+          loadStudyById(activeStudyId, authToken ?? undefined),
+          fetchJobMeta(activeStudyId),
+        ])
+
+        if (cancelled) {
+          return
+        }
+
+        if (studyData) {
+          setSegments(studyData.segments)
+          setFindings(studyData.findings)
+          setViewerSlice(studyData.preferredSlice ?? 120)
+          setFiles([])
+          setDicomFiles([])
+          setDicomError(null)
+          void hydrateDicomResources(studyData.dicomResources, {
+            token: authToken ?? undefined,
+          })
+        } else {
+          setSegments([])
+          setFindings([])
+        }
+
+        applyJobMeta(jobMeta)
+      } catch (error) {
+        if (cancelled) {
+          return
+        }
         console.error('Не удалось загрузить исследование', error)
         setStudyError('Не удалось загрузить исследование')
         setSegments([])
         setFindings([])
         setJob(null)
-      })
-      .finally(() => {
+      } finally {
         if (!cancelled) {
           setStudyLoading(false)
         }
-      })
+      }
+    }
+
+    void load()
 
     return () => {
       cancelled = true
     }
-  }, [activeStudyId, authToken, hydrateDicomResources, isAuthenticated])
+  }, [activeStudyId, applyJobMeta, authToken, fetchJobMeta, hydrateDicomResources, isAuthenticated])
 
   useEffect(() => {
     if (!isAuthenticated) {
@@ -658,6 +774,12 @@ function useWorkspaceController() {
           studyDate: today.toISOString().slice(0, 10),
         })
         setJob((prev) => (prev ? { ...prev, id: resolvedJobId } : prev))
+        try {
+          const meta = await fetchJobMeta(resolvedJobId)
+          applyJobMeta(meta)
+        } catch (error) {
+          console.error('Не удалось обновить метаданные задания', error)
+        }
       } else {
         updateJob(jobInstance.id, { title: 'job-created' })
       }
@@ -677,7 +799,7 @@ function useWorkspaceController() {
         setDicomError('Не удалось распаковать DICOM файлы')
       }
     },
-    [addJob, authToken, removeJob, startJob, updateJob],
+    [addJob, applyJobMeta, authToken, fetchJobMeta, removeJob, startJob, updateJob],
   )
 
   const handleCancelJob = useCallback(() => {

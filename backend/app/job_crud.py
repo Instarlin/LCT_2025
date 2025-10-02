@@ -10,7 +10,11 @@ def get_job(db: Session, job_id: int) -> Optional[models.Job]:
 
 def get_job_by_uuid(db: Session, job_uuid: str) -> Optional[models.Job]:
     """Получает задание по UUID"""
-    return db.query(models.Job).filter(models.Job.uuid == job_uuid).first()
+    try:
+        uuid_value = uuid.UUID(str(job_uuid))
+    except (ValueError, TypeError):
+        return None
+    return db.query(models.Job).filter(models.Job.uuid == uuid_value).first()
 
 def get_jobs_by_owner(db: Session, owner_id: int, skip: int = 0, limit: int = 100) -> List[models.Job]:
     """Получает задания пользователя с пагинацией"""
@@ -25,7 +29,7 @@ def create_job(db: Session, job: schemas.JobCreate, owner_id: int) -> models.Job
     db_job = models.Job(
         title=job.title,
         description=job.description,
-        file_type=job.file_type or "single",
+        file_type="single",
         owner_id=owner_id,
         uuid=uuid.uuid4()
     )
