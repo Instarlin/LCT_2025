@@ -34,6 +34,13 @@ type UploadJobResult = {
   rawResponse: unknown
 }
 
+type JobResultsPayload = {
+  parsed_at?: string | null
+  summary?: Record<string, unknown>
+  findings?: Array<Record<string, unknown>>
+  metrics?: Array<Record<string, unknown>>
+}
+
 type JobMeta = {
   id: string
   status?: string | null
@@ -44,6 +51,8 @@ type JobMeta = {
   owner_id?: number
   created_at?: string | null
   updated_at?: string | null
+  results_payload?: JobResultsPayload | null
+  results_parsed_at?: string | null
 }
 
 const uploadJobFile = ({ file, token, onProgress, assignRequest }: UploadFileParams): Promise<UploadJobResult> =>
@@ -104,19 +113,72 @@ const mapJobStatusToUploadStatus = (status?: string | null): JobStatus => {
   }
 
   const normalized = status.toLowerCase()
-  if (normalized === 'completed' || normalized === 'done') {
+  if (normalized === 'completed' || normalized === 'done' || normalized === 'succeeded' || normalized === 'success') {
     return 'succeeded'
   }
   if (normalized === 'failed' || normalized === 'error') {
     return 'failed'
   }
-  if (normalized === 'processing' || normalized === 'in_progress') {
+  if (normalized === 'processing' || normalized === 'in_progress' || normalized === 'running') {
     return 'running'
   }
-  if (normalized === 'pending' || normalized === 'queued') {
+  if (normalized === 'pending' || normalized === 'queued' || normalized === 'created') {
     return 'queued'
   }
   return 'queued'
+}
+
+const statusSummaryText: Record<JobStatus, string> = {
+  idle: 'Ожидание запуска анализа',
+  queued: 'Задание поставлено в очередь',
+  running: 'Идёт анализ',
+  succeeded: 'Анализ завершён',
+  failed: 'Анализ завершился ошибкой',
+}
+
+const mapSummaryToFindings = (summary?: Record<string, unknown>): FindingSummary[] => {
+  if (!summary) return []
+  return Object.entries(summary)
+    .filter(([key]) => key.trim().length > 0)
+    .map(([label, value]) => ({
+      label,
+      value: value === null || value === undefined ? '—' : String(value),
+    }))
+}
+
+const mapMetricsToSegments = (metrics?: Array<Record<string, unknown>>): SegmentItem[] => {
+  if (!metrics) return []
+
+  const extractNumber = (row: Record<string, unknown>, keys: string[]): number => {
+    for (const key of keys) {
+      const value = row[key]
+      const numeric = typeof value === 'number' ? value : typeof value === 'string' ? Number.parseFloat(value) : NaN
+      if (Number.isFinite(numeric)) {
+        return numeric
+      }
+    }
+    return 0
+  }
+
+  return metrics.map((row, index) => {
+    const label =
+      (typeof row.label === 'string' && row.label) ||
+      (typeof row.name === 'string' && row.name) ||
+      (typeof row.metric === 'string' && row.metric) ||
+      (typeof row.region === 'string' && row.region) ||
+      `Metric ${index + 1}`
+
+    const volume = extractNumber(row, ['volume', 'volume_ml', 'volumeMl', 'volume (ml)', 'Объём (мл)'])
+    const percentage = extractNumber(row, ['percentage', 'percent', 'percentage_%', '% лёгочной ткани', '%'])
+
+    return {
+      id: `${index}-${label}`,
+      label,
+      color: '#38bdf8',
+      volumeMl: Number.isFinite(volume) ? volume : 0,
+      percentage: Number.isFinite(percentage) ? percentage : 0,
+    }
+  })
 }
 
 const App = () => {
@@ -162,6 +224,7 @@ const WorkspaceView = ({
     setAnonymize,
     connectionState,
     isUploading,
+    jobTerminal,
   } = upload
   const {
     selectedSegments,
@@ -240,6 +303,7 @@ const WorkspaceView = ({
             onCancelJob={onCancelJob}
             onRetry={onRetry}
             connectionState={connectionState}
+            showConnection={!jobTerminal}
             onCopySegments={onCopyTable}
             isUploading={isUploading}
             selectedSegments={selectedSegments}
@@ -275,6 +339,8 @@ function useWorkspaceController() {
   const [studyError, setStudyError] = useState<string | null>(null)
   const [dicomFiles, setDicomFiles] = useState<DicomFile[]>([])
   const [dicomError, setDicomError] = useState<string | null>(null)
+  const [jobResults, setJobResults] = useState<JobResultsPayload | null>(null)
+  const jobTerminal = job?.status === 'succeeded' || job?.status === 'failed'
 
   const viewerFullscreen = useViewerStore((state) => state.fullscreen)
   const setViewerFullscreen = useViewerStore((state) => state.setFullscreen)
@@ -308,6 +374,82 @@ function useWorkspaceController() {
   const statusTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const uploadRequestRef = useRef<XMLHttpRequest | null>(null)
+  const fetchedResultsRef = useRef<Set<string>>(new Set())
+  const wsRef = useRef<WebSocket | null>(null)
+  const wsRetryRef = useRef<number | null>(null)
+  const shouldReconnectRef = useRef(true)
+
+  const applyJobResults = useCallback(
+    (jobId: string, results: JobResultsPayload | string | null | undefined) => {
+      if (!results) return
+
+      let normalized: JobResultsPayload | null = null
+      if (typeof results === 'string') {
+        try {
+          normalized = JSON.parse(results) as JobResultsPayload
+        } catch (error) {
+          console.error('Не удалось разобрать результаты задания', error)
+        }
+      } else {
+        normalized = results
+      }
+
+      if (!normalized) return
+
+      fetchedResultsRef.current.add(jobId)
+      setJobResults(normalized)
+      setIsUploading(false)
+
+      const summaryFindings = mapSummaryToFindings(normalized.summary)
+      if (summaryFindings.length > 0) {
+        setFindings(summaryFindings)
+      }
+
+      const metricSegments = mapMetricsToSegments(normalized.metrics)
+      if (metricSegments.length > 0) {
+        setSegments(metricSegments)
+        setDicomFiles([])
+        setDicomError(null)
+      }
+    },
+    [],
+  )
+
+  const fetchJobResults = useCallback(
+    async (jobId: string, force = false) => {
+      if (!force && fetchedResultsRef.current.has(jobId)) {
+        return
+      }
+
+      const headers: Record<string, string> = {
+        Accept: 'application/json',
+      }
+      if (authToken) {
+        headers.Authorization = `Bearer ${authToken}`
+      }
+
+      const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/results`, {
+        method: 'GET',
+        headers,
+      })
+
+      if (!response.ok) {
+        if (response.status === 404) {
+          return
+        }
+        throw new Error(`Не удалось получить обработанные результаты (${response.status})`)
+      }
+
+      const payload = (await response.json()) as {
+        results?: JobResultsPayload | null
+      }
+
+      console.log('payload', payload)
+
+      applyJobResults(jobId, payload.results)
+    },
+    [authToken, applyJobResults],
+  )
 
   const fetchJobMeta = useCallback(
     async (jobId: string): Promise<JobMeta> => {
@@ -342,44 +484,64 @@ function useWorkspaceController() {
         owner_id: payload.owner_id,
         created_at: payload.created_at ?? null,
         updated_at: payload.updated_at ?? null,
+        results_payload: payload.results_payload ?? null,
+        results_parsed_at: payload.results_parsed_at ?? null,
       }
     },
     [authToken],
   )
 
-  const applyJobMeta = useCallback((meta: JobMeta) => {
-    setJob((previous) => {
+  const applyJobMeta = useCallback(
+    (meta: JobMeta) => {
       const mappedStatus = mapJobStatusToUploadStatus(meta.status)
-      const previousProgress = previous?.progress ?? 0
-      const statusProgress =
-        mappedStatus === 'succeeded'
-          ? 100
-          : mappedStatus === 'failed'
-            ? 0
-            : previousProgress
+      setJob((previous) => {
+        const previousProgress = previous?.progress ?? 0
+        const statusProgress =
+          mappedStatus === 'succeeded'
+            ? 100
+            : mappedStatus === 'failed'
+              ? 0
+              : previousProgress
 
-      const totalBytes =
-        typeof meta.file_size === 'number'
-          ? meta.file_size
-          : previous?.totalBytes ?? 0
+        const totalBytes =
+          typeof meta.file_size === 'number'
+            ? meta.file_size
+            : previous?.totalBytes ?? 0
 
-      const totalFiles = meta.file_name ? 1 : previous?.totalFiles ?? 0
+        const totalFiles = meta.file_name ? 1 : previous?.totalFiles ?? 0
 
-      const startedAt = meta.created_at
-        ? Date.parse(meta.created_at)
-        : previous?.startedAt ?? Date.now()
+        const startedAt = meta.created_at
+          ? Date.parse(meta.created_at)
+          : previous?.startedAt ?? Date.now()
 
-      return {
-        id: meta.id,
-        status: mappedStatus,
-        progress: Math.max(previousProgress, statusProgress),
-        etaSeconds: mappedStatus === 'running' ? previous?.etaSeconds : undefined,
-        startedAt,
-        totalFiles,
-        totalBytes,
+        return {
+          id: meta.id,
+          status: mappedStatus,
+          progress: Math.max(previousProgress, statusProgress),
+          etaSeconds: mappedStatus === 'running' ? previous?.etaSeconds : undefined,
+          startedAt,
+          totalFiles,
+          totalBytes,
+        }
+      })
+      if (mappedStatus !== 'running') {
+        setIsUploading(false)
       }
-    })
-  }, [])
+
+      if (meta.results_payload) {
+        applyJobResults(meta.id, meta.results_payload)
+      } else if (meta.status && meta.status.toLowerCase() === 'succeeded') {
+        fetchJobResults(meta.id).catch((error) => {
+          console.error('Не удалось загрузить результаты задания', error)
+        })
+      }
+
+      updateJob(meta.id, {
+        summary: statusSummaryText[mappedStatus],
+      })
+    },
+    [applyJobResults, fetchJobResults, updateJob],
+  )
 
   const applySidebarDefault = useCallback(() => {
     if (typeof window === 'undefined') {
@@ -389,6 +551,101 @@ function useWorkspaceController() {
     const shouldCollapseSidebar = window.matchMedia('(max-width: 1023px)').matches
     setViewerFullscreen(shouldCollapseSidebar)
   }, [resetViewerFullscreen, setViewerFullscreen])
+
+  const mapJobPayloadToMeta = useCallback((payload: Record<string, unknown>): JobMeta => {
+    const idValue =
+      (typeof payload.id === 'string' && payload.id) ||
+      (typeof payload.uuid === 'string' && payload.uuid) ||
+      (typeof payload.id === 'number' && String(payload.id)) ||
+      ''
+
+    return {
+      id: idValue,
+      status: typeof payload.status === 'string' ? payload.status : null,
+      title: typeof payload.title === 'string' ? payload.title : null,
+      description: typeof payload.description === 'string' ? payload.description : null,
+      file_name: typeof payload.file_name === 'string' ? payload.file_name : null,
+      file_size:
+        typeof payload.file_size === 'number'
+          ? payload.file_size
+          : typeof payload.file_size === 'string'
+            ? Number.parseFloat(payload.file_size)
+            : null,
+      owner_id: typeof payload.owner_id === 'number' ? payload.owner_id : undefined,
+      created_at: typeof payload.created_at === 'string' ? payload.created_at : null,
+      updated_at: typeof payload.updated_at === 'string' ? payload.updated_at : null,
+      results_payload: (payload.results_payload as JobResultsPayload | null | undefined) ?? null,
+      results_parsed_at: typeof payload.results_parsed_at === 'string' ? payload.results_parsed_at : null,
+    }
+  }, [])
+
+  const openJobSocket = useCallback(
+    (jobId: string) => {
+      if (typeof window === 'undefined') return
+
+      if (wsRef.current) {
+        wsRef.current.close()
+        wsRef.current = null
+      }
+
+      shouldReconnectRef.current = true
+      setConnectionState('reconnecting')
+
+      const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws'
+      const host = window.location.host
+      const socket = new WebSocket(`${protocol}://${host}/api/ws/jobs/${encodeURIComponent(jobId)}`)
+      wsRef.current = socket
+
+      socket.onopen = () => {
+        setConnectionState('connected')
+      }
+
+      socket.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data) as Record<string, unknown>
+          if (data?.type === 'job.update' && data.job && typeof data.job === 'object') {
+            const meta = mapJobPayloadToMeta(data.job as Record<string, unknown>)
+            applyJobMeta(meta)
+
+            const mappedStatus = mapJobStatusToUploadStatus(meta.status)
+            if (mappedStatus === 'succeeded' || mappedStatus === 'failed') {
+              shouldReconnectRef.current = false
+              setConnectionState('connected')
+              socket.close()
+            }
+          }
+        } catch (error) {
+          console.error('Не удалось обработать сообщение WS', error)
+        }
+      }
+
+      const scheduleReconnect = () => {
+        if (shouldReconnectRef.current) {
+          if (wsRetryRef.current) {
+            window.clearTimeout(wsRetryRef.current)
+          }
+          wsRetryRef.current = window.setTimeout(() => {
+            openJobSocket(jobId)
+          }, 2000)
+        }
+      }
+
+      socket.onclose = () => {
+        if (shouldReconnectRef.current) {
+          setConnectionState('reconnecting')
+        } else {
+          setConnectionState('connected')
+        }
+        wsRef.current = null
+        scheduleReconnect()
+      }
+
+      socket.onerror = () => {
+        socket.close()
+      }
+    },
+    [applyJobMeta, mapJobPayloadToMeta],
+  )
 
   const hydrateDicomResources = useCallback(
     async (resources: StudyData['dicomResources'] | undefined, options?: { token?: string }) => {
@@ -593,6 +850,15 @@ function useWorkspaceController() {
       uploadRequestRef.current.abort()
       uploadRequestRef.current = null
     }
+    if (wsRetryRef.current) {
+      window.clearTimeout(wsRetryRef.current)
+      wsRetryRef.current = null
+    }
+    if (wsRef.current) {
+      wsRef.current.close()
+      wsRef.current = null
+    }
+    shouldReconnectRef.current = true
     setActiveStudyId(null)
     setJob(null)
     setFiles([])
@@ -606,6 +872,9 @@ function useWorkspaceController() {
     setStudyLoading(false)
     setDicomFiles([])
     setDicomError(null)
+    setJobResults(null)
+    fetchedResultsRef.current.clear()
+    setConnectionState('connected')
     applySidebarDefault()
   }, [applySidebarDefault, setHistorySearch, setSelectedPathology])
 
@@ -656,6 +925,39 @@ function useWorkspaceController() {
     simulateStatusStream(job.id)
   }, [isAuthenticated, job, simulateStatusStream, isUploading])
 
+  useEffect(() => {
+    const jobId = job?.id
+
+    if (!isAuthenticated || !jobId || jobTerminal) {
+      if (wsRetryRef.current) {
+        window.clearTimeout(wsRetryRef.current)
+        wsRetryRef.current = null
+      }
+      if (wsRef.current) {
+        wsRef.current.close()
+        wsRef.current = null
+      }
+      shouldReconnectRef.current = false
+      if (jobTerminal) {
+        setConnectionState('connected')
+      }
+      return
+    }
+
+    openJobSocket(jobId)
+
+    return () => {
+      if (wsRetryRef.current) {
+        window.clearTimeout(wsRetryRef.current)
+        wsRetryRef.current = null
+      }
+      if (wsRef.current) {
+        wsRef.current.close()
+        wsRef.current = null
+      }
+    }
+  }, [isAuthenticated, job?.id, jobTerminal, openJobSocket])
+
   const startJob = useCallback(
     (pickedFiles: File[]): UploadJob | null => {
       const total = pickedFiles.reduce((sum, file) => sum + file.size, 0)
@@ -664,7 +966,7 @@ function useWorkspaceController() {
           typeof crypto !== 'undefined' && 'randomUUID' in crypto
             ? crypto.randomUUID()
             : `job-${Math.random().toString(16).slice(2, 10)}`,
-        status: 'running',
+        status: 'queued',
         progress: 0,
         startedAt: Date.now(),
         etaSeconds: undefined,
@@ -708,7 +1010,7 @@ function useWorkspaceController() {
         title: 'job-new',
         patient: '—',
         studyDate: today.toISOString().slice(0, 10),
-        summary: 'Задание отправлено и ожидает подтверждения',
+        summary: statusSummaryText.queued,
         involvement: 0,
         tags: [],
         badges: [],
@@ -742,6 +1044,9 @@ function useWorkspaceController() {
           },
         })
         resolvedJobId = result.jobId
+        if (resolvedJobId) {
+          fetchedResultsRef.current.delete(resolvedJobId)
+        }
         setJob((prev) => (prev ? { ...prev, progress: 100 } : prev))
       } catch (error) {
         uploadFailed = true
@@ -894,6 +1199,7 @@ function useWorkspaceController() {
       setAnonymize,
       connectionState,
       isUploading,
+      jobTerminal,
     },
     viewer: {
       segments,

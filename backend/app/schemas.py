@@ -1,7 +1,9 @@
-from pydantic import BaseModel, EmailStr, validator, Field, ConfigDict
-from typing import Optional
+import json
 from datetime import datetime
 import uuid
+from typing import Optional
+
+from pydantic import BaseModel, EmailStr, Field, ConfigDict, validator, field_validator
 
 class UserBase(BaseModel):
     username: str
@@ -78,9 +80,28 @@ class JobResponse(BaseModel):
     owner_id: int
     created_at: datetime
     updated_at: Optional[datetime] = None
+    results_payload: Optional[dict] = None
+    results_parsed_at: Optional[datetime] = None
 
     model_config = ConfigDict(from_attributes=True, populate_by_name=True)
+
+    @field_validator("results_payload", mode="before")
+    @classmethod
+    def _parse_results_payload(cls, value):
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except json.JSONDecodeError:
+                return None
+        return value
 
 
 class JobWithOwner(JobResponse):
     owner: UserResponse
+
+
+class JobCompletionPayload(BaseModel):
+    status: str
+    output_object: Optional[str] = None
+    file_size: Optional[int] = None
+    file_name: Optional[str] = None

@@ -8,13 +8,17 @@ import httpx
 logger = logging.getLogger(__name__)
 
 
+DEFAULT_PROFILE = os.getenv("ML_DEFAULT_PROFILE", "fast_debug")
+DEFAULT_THRESHOLD = float(os.getenv("ML_DECISION_THRESHOLD", "0.55"))
+
+
 @dataclass(frozen=True)
 class InferenceRequest:
     job_uuid: str
     input_object: str
     output_object: Optional[str] = None
-    profile: str = "balanced"
-    threshold: float = 0.55
+    profile: str = DEFAULT_PROFILE
+    threshold: float = DEFAULT_THRESHOLD
 
 
 @dataclass(frozen=True)

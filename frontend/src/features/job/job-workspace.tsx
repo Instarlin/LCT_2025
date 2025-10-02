@@ -20,8 +20,8 @@ const statusTone: Record<UploadJob['status'], string> = {
 const statusLabel: Record<UploadJob['status'], string> = {
   idle: 'Ожидание',
   queued: 'В очереди',
-  running: 'Выполняется',
-  succeeded: 'Готово',
+  running: 'Анализ',
+  succeeded: 'Завершено',
   failed: 'Ошибка',
 }
 
@@ -34,6 +34,7 @@ type JobWorkspaceProps = {
   onCancelJob: () => void
   onRetry: () => void
   connectionState: 'connected' | 'reconnecting'
+  showConnection: boolean
   onCopySegments: () => void
   isUploading: boolean
   selectedSegments: Set<string>
@@ -71,6 +72,7 @@ export const JobWorkspace = ({
   dicomFiles,
   dicomError,
   viewerFullscreen,
+  showConnection,
 }: JobWorkspaceProps) => (
   <section className="flex flex-1 flex-col bg-transparent overflow-y-auto">
     <div className="flex flex-col gap-6 px-4 py-6 sm:px-6 lg:px-8">
@@ -84,7 +86,7 @@ export const JobWorkspace = ({
                 ETA ≈ {Math.max(job.etaSeconds, 0)} c
               </span>
             )}
-            <ConnectionPill state={connectionState} />
+            {showConnection && <ConnectionPill state={connectionState} />}
           </div>
         </div>
         <div className="flex items-center gap-3">

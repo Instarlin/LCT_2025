@@ -1,18 +1,35 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, status, Form
+from fastapi import (
+    BackgroundTasks,
+    Depends,
+    FastAPI,
+    File,
+    Header,
+    HTTPException,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+    status,
+    Form,
+)
 from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPBearer
 from fastapi.middleware.cors import CORSMiddleware
-from typing import List
+from typing import List, Optional
+import asyncio
 import io
 import json
+import logging
 import mimetypes
 import os
 from sqlalchemy.orm import Session
-from datetime import timedelta
+from datetime import datetime, timedelta
 from .minio_client import minio_client
 from . import crud, models, schemas, auth, job_crud, minio_utils, zip_utils
+from .ml import InferenceRequest, ModelAdapter
+from .parsers import parse_job_xlsx
 from .database import SessionLocal, engine, get_db
 from .db_wait import wait_for_postgres
+from .websocket_manager import JobWebSocketManager
 
 app = FastAPI(
     title="California Gold API",
@@ -72,6 +89,80 @@ if wait_for_postgres():
     print("✅ Таблицы созданы успешно!")
 else:
     print("❌ Не удалось подключиться к PostgreSQL")
+
+job_ws_manager = JobWebSocketManager()
+ML_SERVICE_TOKEN = os.getenv("ML_SERVICE_TOKEN")
+model_adapter = ModelAdapter()
+logger = logging.getLogger(__name__)
+
+
+def _job_identifier(job: models.Job) -> str:
+    if getattr(job, "uuid", None):
+        return str(job.uuid)
+    return str(job.id)
+
+
+def _job_payload(job: models.Job) -> dict:
+    job_schema = schemas.JobResponse.model_validate(job)
+    return {
+        "type": "job.update",
+        "job": job_schema.model_dump(mode="json", by_alias=True),
+    }
+
+
+async def broadcast_job_update(job: models.Job) -> None:
+    await job_ws_manager.broadcast(_job_identifier(job), _job_payload(job))
+
+
+def schedule_job_broadcast(background_tasks: BackgroundTasks, job: models.Job) -> None:
+    background_tasks.add_task(
+        job_ws_manager.broadcast,
+        _job_identifier(job),
+        _job_payload(job),
+    )
+
+
+def _validate_ml_service_token(auth_header: Optional[str]) -> None:
+    expected = ML_SERVICE_TOKEN
+    if not expected:
+        return
+    if not auth_header:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing ML service token")
+
+    token = auth_header
+    if token.lower().startswith("bearer "):
+        token = token[7:]
+
+    if token != expected:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid ML service token")
+
+
+async def process_job(job_uuid: str, input_object: str) -> None:
+    session = SessionLocal()
+    try:
+        job = job_crud.get_job_by_uuid(session, job_uuid)
+        if job is None and job_uuid.isdigit():
+            job = job_crud.get_job(session, int(job_uuid))
+        if job is not None:
+            updated = job_crud.update_job_status(session, job.id, "processing")
+            if updated is not None:
+                await broadcast_job_update(updated)
+
+        request = InferenceRequest(job_uuid=job_uuid, input_object=input_object)
+        await model_adapter.run_inference(request)
+    except Exception as exc:
+        logger.exception("Inference failed for job %s", job_uuid, exc_info=exc)
+        job = job_crud.get_job_by_uuid(session, job_uuid)
+        if job is None and job_uuid.isdigit():
+            job = job_crud.get_job(session, int(job_uuid))
+        if job is not None:
+            job.status = "failed"
+            session.add(job)
+            session.commit()
+            session.refresh(job)
+            await broadcast_job_update(job)
+    finally:
+        session.close()
 
 @app.get("/", tags=["🏠 Главная"])
 def read_root():
@@ -445,7 +536,8 @@ def read_user_by_username(
 # ==================== ЭНДПОИНТЫ ДЛЯ ЗАДАНИЙ ====================
 
 @app.post("/jobs", response_model=schemas.JobResponse, tags=["📋 Задания"])
-def create_job(
+async def create_job(
+    background_tasks: BackgroundTasks,
     title: str = Form(None),
     description: str = Form(None),
     file: UploadFile = File(None),
@@ -480,6 +572,8 @@ def create_job(
     db_job = job_crud.create_job(db=db, job=job_data, owner_id=current_user.id)
     
     # Если есть файл, загружаем его в MinIO
+    input_object: Optional[str] = None
+
     if file and file.filename:
         file_obj = file.file
 
@@ -526,7 +620,7 @@ def create_job(
                 zip_contents = zip_utils.get_zip_contents_stream(file_obj)
                 print(f"📦 ZIP архив содержит {len(zip_contents)} файлов")
 
-            job_crud.update_job_file_info(
+            db_job = job_crud.update_job_file_info(
                 db=db,
                 job_id=db_job.id,
                 file_name=file.filename,
@@ -536,11 +630,19 @@ def create_job(
                 file_type=file_type,
                 zip_contents=zip_contents
             )
+            input_object = file_path
         else:
             # Если загрузка файла не удалась, удаляем задание
             job_crud.delete_job(db=db, job_id=db_job.id)
             raise HTTPException(status_code=500, detail="Ошибка загрузки файла")
-    
+
+    if input_object:
+        db_job = job_crud.update_job_status(db, db_job.id, "queued") or db_job
+        schedule_job_broadcast(background_tasks, db_job)
+        asyncio.create_task(process_job(str(db_job.uuid), input_object))
+    else:
+        schedule_job_broadcast(background_tasks, db_job)
+
     return db_job
 
 @app.get("/jobs", response_model=List[schemas.JobResponse], tags=["📋 Задания"])
@@ -560,7 +662,7 @@ def get_user_jobs(
     
     Возвращает список заданий пользователя.
     """
-    jobs = job_crud.get_jobs_by_owner(db=db, owner_id=current_user.id, skip=skip, limit=limit)
+    jobs = job_crud.get_jobs_by_owner(db=db, owner_id=current_user.id, skip=0, limit=limit)
     return jobs
 
 @app.get("/jobs/{job_id}", response_model=schemas.JobResponse, tags=["📋 Задания"])
@@ -618,6 +720,7 @@ def get_job_by_uuid(
 def update_job(
     job_id: int,
     job_update: schemas.JobUpdate,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_active_user)
 ):
@@ -640,6 +743,7 @@ def update_job(
         raise HTTPException(status_code=403, detail="Нет доступа к этому заданию")
     
     updated_job = job_crud.update_job(db=db, job_id=job_id, job_update=job_update)
+    schedule_job_broadcast(background_tasks, updated_job)
     return updated_job
 
 @app.delete("/jobs/{job_id}", tags=["📋 Задания"])
@@ -786,10 +890,124 @@ def get_zip_info(
         raise HTTPException(status_code=500, detail="Ошибка получения файла")
     
     zip_info = zip_utils.get_zip_file_info(file_content)
-    
+
     return {
         "job_id": job.id,
         "zip_filename": job.file_name,
         "file_size": job.file_size,
         "zip_info": zip_info
+    }
+
+
+@app.websocket("/ws/jobs/{job_id}")
+async def job_updates_ws(websocket: WebSocket, job_id: str):
+    await job_ws_manager.connect(job_id, websocket)
+
+    session = SessionLocal()
+    try:
+        job = job_crud.get_job_by_uuid(session, job_id)
+        if job is None and job_id.isdigit():
+            job = job_crud.get_job(session, int(job_id))
+        if job:
+            await websocket.send_json(_job_payload(job))
+        else:
+            await websocket.send_json({"type": "job.not_found", "job_id": job_id})
+
+        try:
+            while True:
+                await websocket.receive_text()
+        except WebSocketDisconnect:
+            pass
+    finally:
+        session.close()
+        await job_ws_manager.disconnect(job_id, websocket)
+
+
+@app.post(
+    "/internal/jobs/{job_id}/completion",
+    response_model=schemas.JobResponse,
+    include_in_schema=False,
+)
+def complete_job(
+    job_id: str,
+    payload: schemas.JobCompletionPayload,
+    background_tasks: BackgroundTasks,
+    authorization: Optional[str] = Header(None),
+    db: Session = Depends(get_db),
+):
+    _validate_ml_service_token(authorization)
+
+    job = job_crud.get_job_by_uuid(db, job_id)
+    if job is None and job_id.isdigit():
+        job = job_crud.get_job(db, int(job_id))
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    logger.info(
+        "Received completion for job %s | status=%s | object=%s | size=%s",
+        job_id,
+        payload.status,
+        payload.output_object,
+        payload.file_size,
+    )
+
+    job.status = payload.status
+    if payload.output_object:
+        job.file_path = payload.output_object
+    if payload.file_size is not None:
+        job.file_size = payload.file_size
+    if payload.file_name:
+        job.file_name = payload.file_name
+
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+
+    schedule_job_broadcast(background_tasks, job)
+    return job
+@app.get("/jobs/{job_id}/results", response_model=dict, tags=["📋 Задания"])
+def get_job_results(
+    job_id: str,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_active_user),
+):
+    job = job_crud.get_job_by_uuid(db=db, job_uuid=job_id)
+    if job is None and job_id.isdigit():
+        job = job_crud.get_job(db=db, job_id=int(job_id))
+    if job is None:
+        raise HTTPException(status_code=404, detail="Задание не найдено")
+
+    if job.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Нет доступа к этому заданию")
+
+    if job.results_payload:
+        return {
+            "job_id": job_id,
+            "parsed_at": job.results_parsed_at,
+            "results": json.loads(job.results_payload),
+            "source": "cached",
+        }
+
+    if not job.file_path:
+        raise HTTPException(status_code=404, detail="Результат ещё не готов")
+
+    success, file_bytes = minio_utils.get_file_from_minio(job.file_path)
+    if not success:
+        raise HTTPException(status_code=500, detail="Не удалось загрузить результат из хранилища")
+
+    parsed = parse_job_xlsx(file_bytes)
+    job.results_payload = json.dumps(parsed, ensure_ascii=False)
+    job.results_parsed_at = datetime.utcnow()
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+
+    schedule_job_broadcast(background_tasks, job)
+
+    return {
+        "job_id": job_id,
+        "parsed_at": job.results_parsed_at,
+        "results": parsed,
+        "source": "fresh",
     }

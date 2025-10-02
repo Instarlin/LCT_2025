@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   backend:
     build:
@@ -16,6 +14,9 @@ services:
       MINIO_SECRET_KEY: minioadmin
       DATABASE_URL: postgresql://postgres:password@postgres:5432/californiagold
       ML_SERVICE_URL: http://ml-service:8080
+      ML_SERVICE_TOKEN: change_me_secure_token
+      ML_DEFAULT_PROFILE: fast_debug
+      ML_DECISION_THRESHOLD: "0.55"
     volumes:
       - ./backend:/app
     depends_on:
@@ -82,6 +83,10 @@ services:
       MINIO_ACCESS_KEY: minioadmin
       MINIO_SECRET_KEY: minioadmin
       MINIO_BUCKET: californiagold
+      BACKEND_URL: http://backend:8000
+      ML_SERVICE_TOKEN: change_me_secure_token
+      ML_DEFAULT_PROFILE: fast_debug
+      ML_DECISION_THRESHOLD: "0.55"
     depends_on:
       minio:
         condition: service_started

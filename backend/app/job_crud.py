@@ -79,7 +79,7 @@ def update_job_status(db: Session, job_id: int, status: str) -> Optional[models.
         return None
     
     db_job.status = status
-    if status == "completed":
+    if status in {"completed", "succeeded", "success"}:
         from sqlalchemy.sql import func
         db_job.completed_at = func.now()
     
