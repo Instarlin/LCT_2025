@@ -78,6 +78,16 @@
   ```bash
   docker compose up ml-service
   ```
+
+- !!!Для корректнй работы ml сервиса сделайте следующие действия: !!!
+
+Создайте в корне директории ml директории weights и stats.
+
+1. В weights нужно будет добавить вес модели файл model и model_meddinov3.pth ([скачать тут](https://drive.google.com/drive/u/2/folders/1zMowuO5pJApjnrcT5XkYHPAY4LYVtJvs))
+
+1. В stats нужно будет добавить stats.npz ([скачать тут](https://drive.google.com/drive/u/2/folders/1zMowuO5pJApjnrcT5XkYHPAY4LYVtJvs))
+
+
 - При самостоятельном запуске вне Docker повторите шаги из контейнерной сборки: установите зависимости модели, настройте доступ к MinIO и укажите URL backend через переменные окружения.
 
 ## Структура репозитория
