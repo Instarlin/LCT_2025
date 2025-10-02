@@ -56,7 +56,7 @@
    export ML_SERVICE_URL="http://localhost:8080"
    export ML_SERVICE_TOKEN="change_me_secure_token"
    export ML_DEFAULT_PROFILE="fast_debug"
-   export ML_DECISION_THRESHOLD="0.55"
+   export ML_DECISION_THRESHOLD="0.25"
    ```
 4. Запустите приложение:
    ```bash
