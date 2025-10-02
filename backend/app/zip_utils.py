@@ -1,9 +1,136 @@
 import zipfile
 import json
 import os
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple, Optional, BinaryIO
 from io import BytesIO
 import mimetypes
+
+MAX_ZIP_SIZE_BYTES = int(os.getenv("ZIP_MAX_SIZE_BYTES", 5 * 1024 * 1024 * 1024))
+
+def _preserve_position(file_obj: BinaryIO) -> Optional[int]:
+    try:
+        return file_obj.tell()
+    except (AttributeError, OSError):
+        return None
+
+
+def _restore_position(file_obj: BinaryIO, position: Optional[int]) -> None:
+    if position is None:
+        return
+    try:
+        file_obj.seek(position)
+    except (AttributeError, OSError):
+        pass
+
+
+def is_zip_stream(file_obj: BinaryIO, filename: str) -> bool:
+    """Проверяет ZIP через поток."""
+    if not filename.lower().endswith('.zip'):
+        return False
+
+    position = _preserve_position(file_obj)
+    try:
+        file_obj.seek(0)
+        with zipfile.ZipFile(file_obj, 'r'):
+            return True
+    except (zipfile.BadZipFile, zipfile.LargeZipFile):
+        return False
+    except Exception:
+        return False
+    finally:
+        _restore_position(file_obj, position)
+
+
+def validate_zip_stream(
+    file_obj: BinaryIO,
+    max_files: int = 1000,
+    max_size: Optional[int] = None,
+) -> Tuple[bool, str]:
+    """Валидирует ZIP поток без загрузки всего в память."""
+    position = _preserve_position(file_obj)
+    try:
+        size_limit = max_size if max_size is not None else MAX_ZIP_SIZE_BYTES
+        try:
+            file_obj.seek(0, os.SEEK_END)
+            total_size = file_obj.tell()
+        except Exception:
+            total_size = None
+
+        if total_size is not None and size_limit and total_size > size_limit:
+            return False, (
+                "ZIP файл слишком большой. Максимальный размер: "
+                f"{size_limit // (1024 * 1024)}MB"
+            )
+
+        file_obj.seek(0)
+        with zipfile.ZipFile(file_obj, 'r') as zip_file:
+            file_count = len([f for f in zip_file.filelist if not f.is_dir()])
+            if file_count > max_files:
+                return False, f"ZIP файл содержит слишком много файлов. Максимум: {max_files}"
+
+            for file_info in zip_file.filelist:
+                if file_info.is_dir():
+                    continue
+                if file_info.file_size > 0:
+                    compression_ratio = file_info.compress_size / file_info.file_size
+                    if compression_ratio < 0.01:
+                        return False, (
+                            f"Подозрительный файл в архиве: {file_info.filename} "
+                            f"(коэффициент сжатия: {compression_ratio:.2%})"
+                        )
+                if len(file_info.filename) > 255:
+                    return False, f"Слишком длинное имя файла: {file_info.filename}"
+                if '..' in file_info.filename or file_info.filename.startswith('/'):
+                    return False, f"Подозрительный путь в архиве: {file_info.filename}"
+
+            encrypted_files = [f for f in zip_file.filelist if f.flag_bits & 0x1 != 0]
+            if encrypted_files:
+                return False, f"ZIP файл содержит зашифрованные файлы: {[f.filename for f in encrypted_files]}"
+
+    except zipfile.BadZipFile:
+        return False, "Поврежденный ZIP файл"
+    except zipfile.LargeZipFile:
+        return False, "ZIP файл слишком большой для обработки"
+    except Exception as e:
+        return False, f"Ошибка валидации ZIP файла: {str(e)}"
+    finally:
+        _restore_position(file_obj, position)
+
+    return True, ""
+
+
+def get_zip_contents_stream(file_obj: BinaryIO) -> List[Dict[str, str]]:
+    """Возвращает содержимое ZIP из потока."""
+    contents: List[Dict[str, str]] = []
+    position = _preserve_position(file_obj)
+    try:
+        file_obj.seek(0)
+        with zipfile.ZipFile(file_obj, 'r') as zip_file:
+            for file_info in zip_file.filelist:
+                if file_info.is_dir():
+                    continue
+
+                file_data = {
+                    'filename': file_info.filename,
+                    'size': file_info.file_size,
+                    'compressed_size': file_info.compress_size,
+                    'compression_ratio': round(
+                        (1 - file_info.compress_size / file_info.file_size) * 100, 2
+                    ) if file_info.file_size > 0 else 0,
+                    'modified_time': file_info.date_time,
+                    'is_encrypted': file_info.flag_bits & 0x1 != 0,
+                    'content_type': mimetypes.guess_type(file_info.filename)[0] or 'application/octet-stream',
+                }
+                contents.append(file_data)
+
+    except Exception as e:
+        print(f"❌ Ошибка при чтении ZIP архива: {e}")
+        return []
+    finally:
+        _restore_position(file_obj, position)
+
+    return contents
+
 
 def is_zip_file(file_content: bytes, filename: str) -> bool:
     """
@@ -68,7 +195,11 @@ def get_zip_contents(file_content: bytes) -> List[Dict[str, str]]:
     
     return contents
 
-def validate_zip_file(file_content: bytes, max_files: int = 1000, max_size: int = 100 * 1024 * 1024) -> Tuple[bool, str]:
+def validate_zip_file(
+    file_content: bytes,
+    max_files: int = 1000,
+    max_size: Optional[int] = None,
+) -> Tuple[bool, str]:
     """
     Валидирует ZIP файл на предмет безопасности и размера
     
@@ -81,10 +212,14 @@ def validate_zip_file(file_content: bytes, max_files: int = 1000, max_size: int 
         Tuple[bool, str]: (is_valid, error_message)
     """
     try:
+        size_limit = max_size if max_size is not None else MAX_ZIP_SIZE_BYTES
         # Проверяем размер файла
-        if len(file_content) > max_size:
-            return False, f"ZIP файл слишком большой. Максимальный размер: {max_size // (1024*1024)}MB"
-        
+        if size_limit and len(file_content) > size_limit:
+            return False, (
+                "ZIP файл слишком большой. Максимальный размер: "
+                f"{size_limit // (1024 * 1024)}MB"
+            )
+
         with zipfile.ZipFile(BytesIO(file_content), 'r') as zip_file:
             # Проверяем количество файлов
             file_count = len([f for f in zip_file.filelist if not f.is_dir()])

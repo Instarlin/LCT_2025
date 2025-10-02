@@ -7,7 +7,7 @@ services:
       dockerfile: Dockerfile
     container_name: backend-app
     working_dir: /app
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --limit-max-requests 1099511628
     ports:
       - "8000:8000"
     environment:

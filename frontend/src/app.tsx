@@ -21,7 +21,70 @@ type ConnectionState = 'connected' | 'reconnecting'
 type WorkspaceController = ReturnType<typeof useWorkspaceController>
 
 const acceptedExtensions = ['.dcm', '.zip']
-const chunkSize = 5 * 1024 * 1024 // 5MB
+
+type UploadFileParams = {
+  file: File
+  token?: string | null
+  onProgress?: (payload: { loaded: number; total?: number; percent: number }) => void
+  assignRequest?: (xhr: XMLHttpRequest) => void
+}
+
+type UploadJobResult = {
+  jobId?: string
+  rawResponse: unknown
+}
+
+const uploadJobFile = ({ file, token, onProgress, assignRequest }: UploadFileParams): Promise<UploadJobResult> =>
+  new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    assignRequest?.(xhr)
+
+    xhr.open('POST', '/api/jobs')
+    if (token) {
+      xhr.setRequestHeader('Authorization', `Bearer ${token}`)
+    }
+    xhr.responseType = 'json'
+
+    xhr.upload.onprogress = (event) => {
+      if (!onProgress) return
+      const { loaded, total } = event
+      const percent = event.lengthComputable && total ? Math.min(100, Math.round((loaded / total) * 100)) : 0
+      onProgress({ loaded, total: event.lengthComputable ? total : undefined, percent })
+    }
+
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        const response = xhr.response ?? (() => {
+          try {
+            return JSON.parse(xhr.responseText)
+          } catch (
+            // eslint-disable-next-line @typescript-eslint/no-unused-vars
+            _error
+          ) {
+            return null
+          }
+        })()
+        const jobIdValue =
+          (response && typeof response === 'object' && 'id' in response && response.id) ??
+          (response && typeof response === 'object' && 'uuid' in response && response.uuid)
+        resolve({ jobId: jobIdValue ? String(jobIdValue) : undefined, rawResponse: response })
+        return
+      }
+      reject(new Error(`Не удалось создать задание (${xhr.status})`))
+    }
+
+    xhr.onerror = () => {
+      reject(new Error('Не удалось отправить файлы на сервер'))
+    }
+
+    xhr.onabort = () => {
+      reject(new DOMException('Загрузка отменена пользователем', 'AbortError'))
+    }
+
+    const formData = new FormData()
+    formData.append('file', file)
+    xhr.send(formData)
+  })
 
 const App = () => {
   const controller = useWorkspaceController()
@@ -211,6 +274,7 @@ function useWorkspaceController() {
 
   const statusTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const uploadRequestRef = useRef<XMLHttpRequest | null>(null)
 
   const applySidebarDefault = useCallback(() => {
     if (typeof window === 'undefined') {
@@ -409,6 +473,10 @@ function useWorkspaceController() {
     if (reconnectTimerRef.current) {
       clearTimeout(reconnectTimerRef.current)
     }
+    if (uploadRequestRef.current) {
+      uploadRequestRef.current.abort()
+      uploadRequestRef.current = null
+    }
     setActiveStudyId(null)
     setJob(null)
     setFiles([])
@@ -465,11 +533,12 @@ function useWorkspaceController() {
     if (!isAuthenticated) {
       return
     }
-    if (!job || job.status === 'idle') return
-    if (job.status === 'running') {
-      simulateStatusStream(job.id)
-    }
-  }, [isAuthenticated, job, simulateStatusStream])
+    if (!job || job.status !== 'running') return
+    if (isUploading) return
+    if (job.progress >= 100) return
+    if (statusTimerRef.current) return
+    simulateStatusStream(job.id)
+  }, [isAuthenticated, job, simulateStatusStream, isUploading])
 
   const startJob = useCallback(
     (pickedFiles: File[]): UploadJob | null => {
@@ -479,7 +548,7 @@ function useWorkspaceController() {
           typeof crypto !== 'undefined' && 'randomUUID' in crypto
             ? crypto.randomUUID()
             : `job-${Math.random().toString(16).slice(2, 10)}`,
-        status: 'queued',
+        status: 'running',
         progress: 0,
         startedAt: Date.now(),
         etaSeconds: undefined,
@@ -495,14 +564,9 @@ function useWorkspaceController() {
       setDicomError(null)
       setFiles(pickedFiles)
       setJob(newJob)
-
-      setTimeout(() => {
-        setJob((prev) => (prev ? { ...prev, status: 'running', etaSeconds: 120 } : prev))
-        simulateStatusStream(newJob.id)
-      }, 800)
       return newJob
     },
-    [simulateStatusStream],
+    [],
   )
 
   const handleFilesAccepted = useCallback(
@@ -537,89 +601,65 @@ function useWorkspaceController() {
 
       addJob(optimisticItem)
 
-      const uploadTask = (async () => {
-        try {
-          const formData = new FormData()
-          formData.append('file', validFiles[0])
-
-          const headers: Record<string, string> = {}
-          if (authToken) {
-            headers.Authorization = `Bearer ${authToken}`
-          }
-
-          const response = await fetch('/api/jobs', {
-            method: 'POST',
-            body: formData,
-            headers,
-          })
-
-          if (!response.ok) {
-            throw new Error(`Не удалось создать задание (${response.status})`)
-          }
-
-          const payload = await response.json().catch(() => ({}))
-          let receivedId: string | undefined
-          if (payload && typeof payload === 'object') {
-            const maybeId = (payload as Record<string, unknown>).id
-            if (typeof maybeId === 'string' && maybeId.trim().length > 0) {
-              receivedId = maybeId
-            } else if (typeof maybeId === 'number') {
-              receivedId = String(maybeId)
-            }
-          }
-
-          if (receivedId) {
-            updateJob(jobInstance.id, {
-              id: receivedId,
-              title: `job-${receivedId}`,
-              studyDate: today.toISOString().slice(0, 10),
-            })
-            setJob((prev) => (prev ? { ...prev, id: receivedId } : prev))
-            simulateStatusStream(receivedId)
-          } else {
-            updateJob(jobInstance.id, { title: 'job-created' })
-          }
-        } catch (error) {
-          console.error('Не удалось отправить файлы на сервер', error)
-          removeJob(jobInstance.id)
-          setJob((prev) =>
-            prev && prev.id === jobInstance.id
-              ? { ...prev, status: 'failed', progress: 0, etaSeconds: undefined }
-              : prev,
-          )
-          setDicomFiles([])
-          setDicomError('Не удалось отправить файлы на сервер')
-          throw error
-        }
-      })()
-
       const dicomPromise = extractDicomFiles(validFiles)
 
-      const total = validFiles.reduce((sum, file) => sum + file.size, 0)
-      let uploaded = 0
-      for (const file of validFiles) {
-        for (let offset = 0; offset < file.size; offset += chunkSize) {
-          const chunk = file.slice(offset, offset + chunkSize)
-          await new Promise((resolve) => setTimeout(resolve, 30))
-          uploaded += chunk.size
-          const percent = Math.round((uploaded / total) * 100)
-          setJob((prev) => (prev ? { ...prev, progress: percent } : prev))
-        }
-      }
-      setJob((prev) => (prev ? { ...prev, progress: Math.max(prev.progress, 95) } : prev))
-
       let uploadFailed = false
-      try {
-        await uploadTask
-      } catch {
-        uploadFailed = true
-      }
+      let resolvedJobId: string | undefined
 
-      setIsUploading(false)
+      try {
+        const result = await uploadJobFile({
+          file: validFiles[0],
+          token: authToken ?? null,
+          assignRequest: (xhr) => {
+            uploadRequestRef.current = xhr
+          },
+          onProgress: ({ percent, total }) => {
+            setJob((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    progress: percent,
+                    totalBytes: total ?? prev.totalBytes,
+                  }
+                : prev,
+            )
+          },
+        })
+        resolvedJobId = result.jobId
+        setJob((prev) => (prev ? { ...prev, progress: 100 } : prev))
+      } catch (error) {
+        uploadFailed = true
+        const isAbort = error instanceof DOMException && error.name === 'AbortError'
+        if (!isAbort) {
+          console.error('Не удалось отправить файлы на сервер', error)
+        }
+        removeJob(jobInstance.id)
+        setJob((prev) =>
+          prev && prev.id === jobInstance.id
+            ? { ...prev, status: 'failed', etaSeconds: undefined }
+            : prev,
+        )
+        setDicomFiles([])
+        setDicomError(isAbort ? null : 'Не удалось отправить файлы на сервер')
+      } finally {
+        setIsUploading(false)
+        uploadRequestRef.current = null
+      }
 
       if (uploadFailed) {
         await dicomPromise.catch(() => undefined)
         return
+      }
+
+      if (resolvedJobId) {
+        updateJob(jobInstance.id, {
+          id: resolvedJobId,
+          title: `job-${resolvedJobId}`,
+          studyDate: today.toISOString().slice(0, 10),
+        })
+        setJob((prev) => (prev ? { ...prev, id: resolvedJobId } : prev))
+      } else {
+        updateJob(jobInstance.id, { title: 'job-created' })
       }
 
       try {
@@ -637,7 +677,7 @@ function useWorkspaceController() {
         setDicomError('Не удалось распаковать DICOM файлы')
       }
     },
-    [addJob, authToken, removeJob, simulateStatusStream, startJob, updateJob],
+    [addJob, authToken, removeJob, startJob, updateJob],
   )
 
   const handleCancelJob = useCallback(() => {
@@ -645,6 +685,11 @@ function useWorkspaceController() {
     if (statusTimerRef.current) {
       clearInterval(statusTimerRef.current)
     }
+    if (uploadRequestRef.current) {
+      uploadRequestRef.current.abort()
+      uploadRequestRef.current = null
+    }
+    setIsUploading(false)
     setJob({ ...job, status: 'failed', progress: job.progress })
   }, [job])
 

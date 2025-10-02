@@ -2,7 +2,7 @@ import os
 import uuid
 from minio import Minio
 from minio.error import S3Error
-from typing import Optional, Tuple
+from typing import Optional, Tuple, BinaryIO
 import mimetypes
 
 # Настройки MinIO
@@ -31,52 +31,73 @@ def ensure_bucket_exists(client: Minio, bucket_name: str = MINIO_BUCKET) -> bool
         print(f"❌ Ошибка при создании bucket: {e}")
         return False
 
-def upload_file_to_minio(file_content: bytes, file_name: str, content_type: Optional[str] = None) -> Tuple[bool, str]:
-    """
-    Загружает файл в MinIO
-    
-    Returns:
-        Tuple[bool, str]: (success, file_path)
-    """
+def upload_fileobj_to_minio(
+    file_obj: BinaryIO,
+    file_name: str,
+    content_type: Optional[str] = None,
+    size: Optional[int] = None,
+    part_size: int = 10 * 1024 * 1024,
+) -> Tuple[bool, str]:
+    """Потоково загружает файл в MinIO."""
     try:
         client = get_minio_client()
-        
-        # Убеждаемся что bucket существует
+
         if not ensure_bucket_exists(client):
             return False, ""
-        
-        # Генерируем уникальный путь для файла
+
         file_uuid = str(uuid.uuid4())
         file_extension = os.path.splitext(file_name)[1]
         object_name = f"jobs/{file_uuid}{file_extension}"
-        
-        # Определяем content type если не указан
+
         if not content_type:
             content_type, _ = mimetypes.guess_type(file_name)
             if not content_type:
                 content_type = "application/octet-stream"
-        
-        # Загружаем файл
-        from io import BytesIO
-        file_data = BytesIO(file_content)
-        
+
+        # Определяем размер если не передан
+        if size is None:
+            try:
+                file_obj.seek(0, os.SEEK_END)
+                size = file_obj.tell()
+            finally:
+                file_obj.seek(0)
+        else:
+            file_obj.seek(0)
+
         client.put_object(
             MINIO_BUCKET,
             object_name,
-            file_data,
-            len(file_content),
-            content_type=content_type
+            file_obj,
+            length=size if size is not None else -1,
+            part_size=part_size,
+            content_type=content_type,
         )
-        
+
+        # Возвращаем каретку к началу, чтобы вызвать повторное чтение при необходимости
+        try:
+            file_obj.seek(0)
+        except Exception:
+            pass
+
         print(f"✅ Файл '{file_name}' загружен в MinIO как '{object_name}'")
         return True, object_name
-        
+
     except S3Error as e:
         print(f"❌ Ошибка загрузки файла в MinIO: {e}")
         return False, ""
     except Exception as e:
         print(f"❌ Неожиданная ошибка при загрузке файла: {e}")
         return False, ""
+
+
+def upload_file_to_minio(file_content: bytes, file_name: str, content_type: Optional[str] = None) -> Tuple[bool, str]:
+    """
+    Сохраняет совместимость для вызовов, передающих содержимое в памяти.
+    """
+    from io import BytesIO
+
+    file_data = BytesIO(file_content)
+    return upload_fileobj_to_minio(file_data, file_name, content_type, size=len(file_content))
 
 def get_file_from_minio(object_name: str) -> Tuple[bool, bytes]:
     """

@@ -6,6 +6,7 @@ from typing import List
 import io
 import json
 import mimetypes
+import os
 from sqlalchemy.orm import Session
 from datetime import timedelta
 from .minio_client import minio_client
@@ -480,40 +481,56 @@ def create_job(
     
     # Если есть файл, загружаем его в MinIO
     if file and file.filename:
-        file_content = file.file.read()
-        
-        # Определяем тип файла
-        is_zip = zip_utils.is_zip_file(file_content, file.filename)
+        file_obj = file.file
+
+        try:
+            file_obj.seek(0, os.SEEK_END)
+            file_size = file_obj.tell()
+        except Exception:
+            file_size = None
+        finally:
+            try:
+                file_obj.seek(0)
+            except Exception:
+                pass
+
+        is_zip = zip_utils.is_zip_stream(file_obj, file.filename)
         file_type = "zip" if is_zip else "single"
-        
-        # Если это ZIP файл, валидируем его
+
+        try:
+            file_obj.seek(0)
+        except Exception:
+            pass
+
         if is_zip:
-            is_valid, error_message = zip_utils.validate_zip_file(file_content)
+            is_valid, error_message = zip_utils.validate_zip_stream(file_obj)
             if not is_valid:
                 job_crud.delete_job(db=db, job_id=db_job.id)
                 raise HTTPException(status_code=400, detail=f"Некорректный ZIP файл: {error_message}")
-        
-        # Загружаем файл в MinIO
-        success, file_path = minio_utils.upload_file_to_minio(
-            file_content=file_content,
+
+        success, file_path = minio_utils.upload_fileobj_to_minio(
+            file_obj=file_obj,
             file_name=file.filename,
-            content_type=file.content_type
+            content_type=file.content_type,
+            size=file_size
         )
-        
+
         if success:
             zip_contents = None
-            
-            # Если это ZIP файл, анализируем его содержимое
+
             if is_zip:
-                zip_contents = zip_utils.get_zip_contents(file_content)
+                try:
+                    file_obj.seek(0)
+                except Exception:
+                    pass
+                zip_contents = zip_utils.get_zip_contents_stream(file_obj)
                 print(f"📦 ZIP архив содержит {len(zip_contents)} файлов")
-            
-            # Обновляем информацию о файле в задании
+
             job_crud.update_job_file_info(
                 db=db,
                 job_id=db_job.id,
                 file_name=file.filename,
-                file_size=len(file_content),
+                file_size=file_size or 0,
                 file_content_type=file.content_type,
                 file_path=file_path,
                 file_type=file_type,
