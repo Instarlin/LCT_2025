@@ -2,7 +2,7 @@ import { useId, type ChangeEvent } from 'react'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Progress } from '@/components/ui/progress'
-import type { FindingSummary, SegmentItem, UploadJob } from '@/types/workspace'
+import type { FindingSummary, UploadJob, JobResultsPayload, JobResultsRow } from '@/types/workspace'
 import type { DicomFile } from '@/lib/dicom/extract-dicoms'
 import { DicomViewer } from './dicom-viewer'
 import { secondaryActionClass } from '@/lib/styles'
@@ -25,8 +25,6 @@ const statusLabel: Record<UploadJob['status'], string> = {
   failed: 'Ошибка',
 }
 
-type SortField = 'label' | 'volumeMl' | 'percentage'
-
 type JobWorkspaceProps = {
   job: UploadJob
   files: File[]
@@ -35,20 +33,15 @@ type JobWorkspaceProps = {
   onRetry: () => void
   connectionState: 'connected' | 'reconnecting'
   showConnection: boolean
-  onCopySegments: () => void
   isUploading: boolean
-  selectedSegments: Set<string>
-  toggleSegment: (id: string) => void
-  sortedSegments: SegmentItem[]
   viewerSlice: number
   onViewerSliceChange: (value: number) => void
   findings: FindingSummary[]
-  handleSort: (field: SortField) => void
-  sortField: SortField
-  sortAsc: boolean
   dicomFiles: DicomFile[]
   dicomError: string | null
   viewerFullscreen: boolean
+  jobResults: JobResultsPayload | null
+  onExportXlsx: () => void
 }
 
 export const JobWorkspace = ({
@@ -58,21 +51,15 @@ export const JobWorkspace = ({
   onCancelJob,
   onRetry,
   connectionState,
-  onCopySegments,
   isUploading,
-  selectedSegments,
-  toggleSegment,
-  sortedSegments,
   viewerSlice,
   onViewerSliceChange,
-  findings,
-  handleSort,
-  sortField,
-  sortAsc,
   dicomFiles,
   dicomError,
   viewerFullscreen,
   showConnection,
+  jobResults,
+  onExportXlsx,
 }: JobWorkspaceProps) => (
   <section className="flex flex-1 flex-col bg-transparent overflow-y-auto">
     <div className="flex flex-col gap-6 px-4 py-6 sm:px-6 lg:px-8">
@@ -131,12 +118,11 @@ export const JobWorkspace = ({
           fullscreen={viewerFullscreen}
         />
         <SegmentSelection
-          segments={sortedSegments}
-          selectedSegments={selectedSegments}
-          toggleSegment={toggleSegment}
+          selectedSegments={new Set()}
+          toggleSegment={() => {}}
         />
         <aside className="flex w-full flex-col gap-4 rounded-2xl border border-slate-200 bg-white/70 p-4 shadow-sm xl:w-fit xl:self-start xl:flex-none">
-          <FindingsSummary findings={findings} />
+          <FindingsSummary />
         </aside>
       </section>
 
@@ -144,19 +130,23 @@ export const JobWorkspace = ({
         <div className="flex flex-wrap items-center justify-between gap-3">
           <h2 className="text-lg font-semibold text-slate-800">Метрики по меткам</h2>
           <div className="flex gap-2">
-            <Button type="button" variant="outline" size="sm" onClick={onCopySegments} className={secondaryActionClass}>
+            {/* <Button type="button" variant="outline" size="sm" className={secondaryActionClass}>
               Copy
-            </Button>
-            <Button type="button" variant="outline" size="sm" className={secondaryActionClass}>
-              Export XLSX
+            </Button> */}
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className={secondaryActionClass}
+              onClick={onExportXlsx}
+              disabled={!jobResults}
+            >
+              Полный XLSX файл
             </Button>
           </div>
         </div>
         <MetricsTable
-          segments={sortedSegments}
-          sortField={sortField}
-          sortAsc={sortAsc}
-          onSort={handleSort}
+          resultRows={jobResults?.rows ?? []}
         />
       </section>
     </div>
@@ -264,39 +254,38 @@ const ViewerPanel = ({
 }
 
 type SegmentSelectionProps = {
-  segments: SegmentItem[]
   selectedSegments: Set<string>
   toggleSegment: (segmentId: string) => void
 }
 
-const SegmentSelection = ({ segments, selectedSegments, toggleSegment }: SegmentSelectionProps) => (
+const SegmentSelection = ({ selectedSegments, toggleSegment }: SegmentSelectionProps) => (
   <div className="flex w-full flex-col gap-4 xl:w-fit xl:self-start xl:flex-none">
     <div className="flex items-center gap-3">
       <h2 className="text-lg font-semibold text-slate-800">Отображение слоёв</h2>
       <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-600">
-        {segments.length} активных меток
+        {selectedSegments.size} активных меток
       </span>
     </div>
-    {segments.length > 0 ? (
+    {selectedSegments.size > 0 ? (
       <div className="flex flex-col gap-2">
-        {segments.map((segment) => {
-          const checkboxId = `overlay-${segment.id}`
+        {Array.from(selectedSegments).map((segment) => {
+          const checkboxId = `overlay-${segment}`
           return (
             <label
-              key={segment.id}
+              key={segment}
               htmlFor={checkboxId}
               className="flex cursor-pointer items-center gap-2 rounded-full border border-slate-200 bg-white/90 px-3 py-1.5 text-xs text-slate-600 shadow-xs transition-colors hover:border-slate-300"
             >
               <Checkbox
                 id={checkboxId}
-                checked={selectedSegments.has(segment.id)}
-                onCheckedChange={() => toggleSegment(segment.id)}
+                checked={selectedSegments.has(segment)}
+                onCheckedChange={() => toggleSegment(segment)}
                 className="size-4"
                 CheckIconSize="size-3"
               />
               <span className="flex items-center gap-2">
-                <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: segment.color }} />
-                <span className="font-medium text-slate-700">{segment.label}</span>
+                <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: segment }} />
+                <span className="font-medium text-slate-700">{segment}</span>
               </span>
             </label>
           )
@@ -308,73 +297,68 @@ const SegmentSelection = ({ segments, selectedSegments, toggleSegment }: Segment
   </div>
 )
 
-type FindingsSummaryProps = { findings: FindingSummary[] }
-
-const FindingsSummary = ({ findings }: FindingsSummaryProps) => (
+const FindingsSummary = () => (
   <div className="flex flex-col gap-4">
     <h2 className="text-lg font-semibold text-slate-800">Краткая сводка</h2>
-    {findings.length > 0 ? (
-      <ul className="mt-4 flex flex-col gap-3 text-sm text-slate-600">
-        {findings.map((summary) => (
-          <li key={summary.label} className="flex flex-col gap-1">
-            <span className="text-xs uppercase tracking-[0.2em] text-slate-400">{summary.label}</span>
-            <strong className="text-base text-slate-800">{summary.value}</strong>
-            {summary.hint && <em className="text-xs text-slate-500">{summary.hint}</em>}
-          </li>
-        ))}
-      </ul>
-    ) : (
       <p className="mt-4 text-sm text-slate-500">Сводка станет доступна после анализа исследования.</p>
-    )}
   </div>
 )
 
 type MetricsTableProps = {
-  segments: SegmentItem[]
-  sortField: SortField
-  sortAsc: boolean
-  onSort: (field: SortField) => void
+  resultRows: JobResultsRow[]
 }
 
-const MetricsTable = ({ segments, sortField, sortAsc, onSort }: MetricsTableProps) => (
-  <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white/95 shadow-sm">
-    <div className="overflow-x-auto">
-      <table className="min-w-full text-sm text-slate-600">
-      <thead className="bg-slate-50 text-left text-sm font-semibold text-slate-600">
-        <tr>
-          <th className="px-4 py-3">
-            <button type="button" onClick={() => onSort('label')} className="inline-flex items-center gap-2 font-semibold">
-              Метка {sortField === 'label' && (sortAsc ? '↑' : '↓')}
-            </button>
-          </th>
-          <th className="px-4 py-3">
-            <button type="button" onClick={() => onSort('volumeMl')} className="inline-flex items-center gap-2 font-semibold">
-              Объём (мл) {sortField === 'volumeMl' && (sortAsc ? '↑' : '↓')}
-            </button>
-          </th>
-          <th className="px-4 py-3">
-            <button
-              type="button"
-              onClick={() => onSort('percentage')}
-              className="inline-flex items-center gap-2 font-semibold"
-            >
-              % лёгочной ткани {sortField === 'percentage' && (sortAsc ? '↑' : '↓')}
-            </button>
-          </th>
-          <th className="px-4 py-3 font-semibold">Срезов</th>
-        </tr>
-      </thead>
-      <tbody className="divide-y divide-slate-100">
-        {segments.map((segment) => (
-          <tr key={segment.id}>
-            <td className="px-4 py-3">{segment.label}</td>
-            <td className="px-4 py-3">{segment.volumeMl}</td>
-            <td className="px-4 py-3">{segment.percentage}</td>
-            <td className="px-4 py-3">{Math.max(5, Math.round(segment.volumeMl / 10))}</td>
-          </tr>
-        ))}
-      </tbody>
-      </table>
+const MetricsTable = ({ resultRows }: MetricsTableProps) => {
+  const hasResults = resultRows.length > 0
+
+  const renderBoolean = (value: boolean | string | null | undefined) => {
+    if (value === null || value === undefined || value === '') return '—'
+    if (typeof value === 'boolean') {
+      return value ? 'Да' : 'Нет'
+    }
+    const normalized = value.toString().trim().toLowerCase()
+    if (['true', '1', 'yes', 'да'].includes(normalized)) return 'Да'
+    if (['false', '0', 'no', 'нет'].includes(normalized)) return 'Нет'
+    return value
+  }
+
+  const formatNumber = (value: number | null | undefined) => {
+    if (value === null || value === undefined || Number.isNaN(value)) {
+      return '—'
+    }
+    return value.toFixed(3)
+  }
+
+  return (
+    <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white/95 shadow-sm">
+      <div className="overflow-x-auto">
+        <table className={`min-w-full ${hasResults ? 'text-xs sm:text-sm' : 'text-sm'} text-slate-600`}>
+          <thead className="bg-slate-50 text-left font-semibold text-slate-600">
+            <tr>
+              <th className="px-4 py-3">Pathology</th>
+              <th className="px-4 py-3">Prob. Pathology</th>
+              <th className="px-4 py-3">Prob. Anomaly</th>
+              <th className="px-4 py-3">Processing Time</th>
+              
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-100">
+            {resultRows.map((row, index) => (
+              <tr key={`${row.study_uid ?? index}-${index}`}>
+                <td className="px-4 py-3">{row.most_dangerous_pathology_type ?? '—'}</td>
+                <td className="px-4 py-3">{formatNumber(row.probability_of_pathology)}</td>
+                <td className="px-4 py-3">{formatNumber(row.probability_of_anomaly)}</td>
+                <td className="px-4 py-3">{row.time_of_processing ?? '—'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {!hasResults && (
+        <p className="px-4 pb-4 text-sm text-slate-500">
+          Таблица обновится после получения метрик для выбранного исследования.
+        </p>
+      )}
     </div>
-  </div>
-)
+  )
+}
